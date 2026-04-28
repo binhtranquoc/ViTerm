@@ -1,0 +1,50 @@
+{
+  "teams": [
+    { "name": "Logpane Host", "icon": "terminal", "plan": "MVP" }
+  ],
+  "services": [
+    {
+      "id": "host",
+      "title": "Host",
+      "url": "/logs/local",
+      "icon": "terminal",
+      "isActive": true
+    },
+    {
+      "id": "logviewer",
+      "title": "Logviewer",
+      "url": "/logviewer",
+      "icon": "book"
+    }
+  ],
+  "connections": [],
+  "groups": [
+    {
+      "id": "grp-openclaw",
+      "name": "OpenClaw",
+      "hosts": [
+        { "id": "host-uat-deligo", "name": "UAT DELIGO", "target": "ssh, root" },
+        { "id": "host-deligo-dev", "name": "Deligo Dev", "target": "ssh, root" }
+      ]
+    },
+    {
+      "id": "grp-octotech",
+      "name": "Octotech",
+      "hosts": [
+        { "id": "host-octotech-dev", "name": "xuongthuchanh-dev", "target": "ssh, root" },
+        { "id": "host-octotech-internal", "name": "Octotech Internal", "target": "ssh, trunkfile.org" }
+      ]
+    }
+  ],
+  "hostHistory": [
+    { "id": "h-1", "name": "MyComputer", "target": "local terminal", "status": "ready" },
+    { "id": "h-2", "name": "103.90.226.96", "target": "ssh, root", "status": "recent" },
+    { "id": "h-3", "name": "Deligo Production", "target": "ssh, root", "status": "recent" },
+    { "id": "h-4", "name": "54.66.129.124", "target": "ssh, ec2-user", "status": "recent" }
+  ],
+  "user": {
+    "name": "Host Operator",
+    "email": "host@logpane.local",
+    "avatar": "/avatars/host-operator.jpg"
+  }
+}

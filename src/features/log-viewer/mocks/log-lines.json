@@ -1,0 +1,38 @@
+[
+  {
+    "id": "host-1",
+    "serviceId": "host",
+    "timestamp": "2026-04-25T14:20:12.102Z",
+    "level": "info",
+    "source": "stdout",
+    "message": "pnpm dev started on port 3000",
+    "raw": "{\"level\":\"info\",\"service\":\"host-terminal\",\"msg\":\"pnpm dev started\",\"port\":3000}"
+  },
+  {
+    "id": "host-2",
+    "serviceId": "host",
+    "timestamp": "2026-04-25T14:20:20.322Z",
+    "level": "info",
+    "source": "json",
+    "message": "HTTP GET /healthz 200 - 7ms",
+    "raw": "{\"level\":\"info\",\"method\":\"GET\",\"path\":\"/healthz\",\"status\":200,\"duration\":7}"
+  },
+  {
+    "id": "host-3",
+    "serviceId": "host",
+    "timestamp": "2026-04-25T14:21:33.876Z",
+    "level": "error",
+    "source": "stdout",
+    "message": "Database connection timeout after 5000ms",
+    "raw": "{\"level\":\"error\",\"service\":\"host-terminal\",\"msg\":\"Database connection timeout\",\"timeout\":5000}"
+  },
+  {
+    "id": "host-4",
+    "serviceId": "host",
+    "timestamp": "2026-04-25T14:22:05.441Z",
+    "level": "info",
+    "source": "json",
+    "message": "SSH profile saved for vps-prod-01",
+    "raw": "{\"level\":\"info\",\"service\":\"host-ssh-vps\",\"msg\":\"SSH profile saved\",\"host\":\"vps-prod-01\"}"
+  }
+]
