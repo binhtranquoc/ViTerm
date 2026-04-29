@@ -1,30 +1,28 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useMemo, useRef, useState } from "react"
 import { LOG_VIEWER_DEFAULT_FILTERS } from "@/features/log-viewer/constants/log-viewer.const"
 import { filterRecordsBySourceType } from "@/features/log-viewer/utils/log-filter.utils"
 import { useSshHosts } from "@/features/terminal-xterm/hooks/use-ssh-hosts"
-import { decodeBase64ToBytes } from "@/shared/lib/base64"
 import type {
   IAddPaneDraft,
   ICreatedPaneResult,
-  ILogBatchPayload,
   ILogPaneState,
   ILogPaneFilters,
   ILogRecord,
   ILogService,
   ILogViewerWorkspaceCache,
-  IPtyOutputPayload,
   IProjectLogSource,
   IProjectSetupState,
   IProjectRunCommand,
-  ISourceStatusPayload,
   ISshRemoteEntry,
 } from "@/features/log-viewer/interfaces/log-viewer.interfaces"
-
-const DEFAULT_ADD_PANE_DRAFT: IAddPaneDraft = {
-  runtimeTarget: "local",
-  projectPath: "",
-  sshHostId: "",
-}
+import {
+  DEFAULT_ADD_PANE_DRAFT,
+  getProjectFolderName,
+  invokeTauri,
+  isTauriRuntime,
+} from "@/features/log-viewer/hooks/use-log-viewer-runtime"
+import { useLogViewerStreamEffects } from "@/features/log-viewer/hooks/use-log-viewer-stream-effects"
+import { useLogViewerSyncEffects } from "@/features/log-viewer/hooks/use-log-viewer-sync-effects"
 
 const logViewerWorkspaceCache: ILogViewerWorkspaceCache = {
   services: [],
@@ -33,7 +31,6 @@ const logViewerWorkspaceCache: ILogViewerWorkspaceCache = {
   runCommands: [],
   logSources: [],
   projectSetup: {
-    projectName: "",
     stack: "custom",
     logOutput: "stdout",
     combineFileLogs: false,
@@ -45,182 +42,9 @@ const logViewerWorkspaceCache: ILogViewerWorkspaceCache = {
   recordsByServiceId: {},
 }
 
-const MAX_RECORDS_FRONTEND = 2000
-const appendLatestRecords = <T,>(current: T[], incoming: T[], maxRecords: number): T[] => {
-  if (incoming.length === 0) return current
-  if (incoming.length >= maxRecords) {
-    return incoming.slice(incoming.length - maxRecords)
-  }
-  const overflow = current.length + incoming.length - maxRecords
-  if (overflow <= 0) {
-    return [...current, ...incoming]
-  }
-  return [...current.slice(overflow), ...incoming]
-}
+ 
 
-const invokeTauri = async <T,>(command: string, payload?: Record<string, unknown>): Promise<T> => {
-  const { invoke } = await import("@tauri-apps/api/core")
-  return invoke<T>(command, payload)
-}
-
-const isTauriRuntime = () =>
-  typeof window !== "undefined" &&
-  ("__TAURI_INTERNALS__" in window || "__TAURI__" in window)
-
-const getProjectFolderName = (projectPath: string) => {
-  const normalizedProjectPath = projectPath.trim().replace(/\\/g, "/").replace(/\/+$/, "")
-  if (!normalizedProjectPath) return ""
-  const segments = normalizedProjectPath.split("/").filter(Boolean)
-  return segments[segments.length - 1] ?? ""
-}
-
-
-// ── PTY JSON-only extraction ─────────────────────────────────────────────────
-// Listens to pty-output from the terminal panel and extracts only valid JSON
-// log objects. Any line that is not parseable JSON (ANSI control sequences,
-// Docker/PM2 prefix noise, blank lines, startup text) is silently dropped.
-const ANSI_ESCAPE_RE = /\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|][^\x07]*(?:\x07|\x1b\\))/g
-const CONTROL_CHAR_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g
-
-const sanitizeTerminalLine = (raw: string) => raw.replace(ANSI_ESCAPE_RE, "").replace(CONTROL_CHAR_RE, "")
-
-const extractJsonOnly = (rawLine: string): { parsed: Record<string, unknown>; cleanedLine: string } | null => {
-  const cleanedLine = sanitizeTerminalLine(rawLine).trim()
-  const start = cleanedLine.indexOf("{")
-  if (start === -1) return null
-  const slice = cleanedLine.slice(start)
-  try {
-    const parsed = JSON.parse(slice)
-    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return { parsed: parsed as Record<string, unknown>, cleanedLine: slice }
-    }
-  } catch {
-    const end = slice.lastIndexOf("}")
-    if (end > 0) {
-      try {
-        const parsed = JSON.parse(slice.slice(0, end + 1))
-        if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
-          return { parsed: parsed as Record<string, unknown>, cleanedLine: slice.slice(0, end + 1) }
-        }
-      } catch {}
-    }
-  }
-  return null
-}
-
-const buildJsonRecordFromPty = (
-  serviceId: string,
-  sourceType: ILogRecord["sourceType"],
-  parsed: Record<string, unknown>,
-  raw: string,
-): ILogRecord => {
-  const levelRaw = String(parsed.level ?? parsed.severity ?? parsed.lvl ?? "").toLowerCase()
-  const level: ILogRecord["level"] =
-    levelRaw === "error" || levelRaw === "fatal" || levelRaw === "critical" ? "error"
-    : levelRaw === "warn" || levelRaw === "warning" ? "warn"
-    : levelRaw === "debug" || levelRaw === "trace" || levelRaw === "verbose" ? "debug"
-    : levelRaw === "info" || levelRaw === "notice" ? "info"
-    : "unknown"
-
-  const msgCandidate = parsed.message ?? parsed.msg ?? parsed.log ?? parsed.text
-  const message =
-    typeof msgCandidate === "string" && msgCandidate.trim()
-      ? sanitizeTerminalLine(msgCandidate).trim()
-      : raw
-
-  const tsCandidate = parsed.timestamp ?? parsed.time ?? parsed["@timestamp"]
-  const timestamp = typeof tsCandidate === "string" && tsCandidate ? tsCandidate : new Date().toISOString()
-
-  return {
-    id: `pty-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    serviceId,
-    timestamp,
-    level,
-    parserType: "json",
-    sourceType,
-    message,
-    raw,
-    fields: extractFlattenedFields(parsed),
-  }
-}
-
-const NGINX_COMBINED_RE =
-  /^(?:[\w][\w.-]*\s*\|\s*)?(\S+)\s+-\s+(\S+)\s+\[([^\]]+)\]\s+"([A-Z]+)\s+([^\s"]+)[^"]*"\s+(\d{3})\s+(\d+|-)\s+"([^"]*)"\s+"([^"]*)"(?:\s+"([^"]*)")?/
-
-const parseNginxDate = (raw: string) => {
-  const match = raw.match(
-    /(\d{2})\/([A-Za-z]{3})\/(\d{4}):(\d{2}:\d{2}:\d{2}) ([+-]\d{4})/,
-  )
-  if (!match) return new Date().toISOString()
-  const [, day, mon, year, hms, offset] = match
-  const date = new Date(`${mon} ${day} ${year} ${hms} ${offset}`)
-  return Number.isNaN(date.getTime()) ? new Date().toISOString() : date.toISOString()
-}
-
-const buildNginxRecordFromPty = (
-  serviceId: string,
-  sourceType: ILogRecord["sourceType"],
-  rawLine: string,
-): ILogRecord | null => {
-  const line = sanitizeTerminalLine(rawLine).trim()
-  const matched = line.match(NGINX_COMBINED_RE)
-  if (!matched) return null
-
-  const [, ip, , timeStr, method, path, status, bytes, referer, ua, realIp] = matched
-  const statusNum = Number.parseInt(status, 10)
-  const bytesNum = bytes === "-" ? 0 : Number.parseInt(bytes, 10)
-  const level: ILogRecord["level"] = statusNum >= 500 ? "error" : statusNum >= 400 ? "warn" : "info"
-
-  const structured = {
-    ip: realIp && realIp !== "-" ? realIp : ip,
-    method,
-    path,
-    status: statusNum,
-    bytes: Number.isNaN(bytesNum) ? 0 : bytesNum,
-    referer,
-    ua,
-    timestamp: parseNginxDate(timeStr),
-    source: "nginx-access",
-  }
-
-  return {
-    id: `nginx-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    serviceId,
-    timestamp: structured.timestamp,
-    level,
-    parserType: "nginx",
-    sourceType,
-    message: `${method} ${path} -> ${status} (${structured.bytes}b)`,
-    raw: JSON.stringify(structured),
-    fields: extractFlattenedFields(structured),
-  }
-}
-
-const extractFlattenedFields = (value: unknown): Record<string, string> => {
-  const fields: Record<string, string> = {}
-  const walk = (current: unknown, prefix: string) => {
-    if (current === null || current === undefined) return
-    if (Array.isArray(current)) {
-      if (prefix.length > 0 && current.length > 0) {
-        fields[prefix] = JSON.stringify(current)
-      }
-      return
-    }
-    if (typeof current === "object") {
-      for (const [key, child] of Object.entries(current as Record<string, unknown>)) {
-        walk(child, prefix ? `${prefix}.${key}` : key)
-      }
-      return
-    }
-    if (prefix.length > 0) {
-      fields[prefix] = String(current)
-    }
-  }
-  walk(value, "")
-  return fields
-}
-
-export function useLogViewerWorkspace() {
+export function useLogViewer() {
   const sshHostsQuery = useSshHosts()
   const sshHosts = sshHostsQuery.data ?? []
   const [services, setServices] = useState<ILogService[]>(() => logViewerWorkspaceCache.services)
@@ -242,8 +66,6 @@ export function useLogViewerWorkspace() {
     () => logViewerWorkspaceCache.recordsByServiceId,
   )
   const ptyChunkBufferRef = useRef<Record<string, string>>({})
-  const panesRef = useRef<ILogPaneState[]>([])
-  const paneLiveStatesRef = useRef<Record<string, boolean>>({})
 
   const servicesById = useMemo(
     () => Object.fromEntries(services.map((service) => [service.id, service])),
@@ -255,223 +77,38 @@ export function useLogViewerWorkspace() {
     () => Object.fromEntries(panes.map((pane) => [pane.terminalTabId, pane])),
     [panes],
   )
-  const servicesByIdRef = useRef(servicesById)
-  const paneByTerminalTabIdRef = useRef(paneByTerminalTabId)
+  const {
+    panesRef,
+    paneLiveStatesRef,
+    servicesByIdRef,
+    paneByTerminalTabIdRef,
+  } = useLogViewerSyncEffects({
+    cache: logViewerWorkspaceCache,
+    services,
+    panes,
+    activePaneId,
+    runCommands,
+    logSources,
+    projectSetup,
+    addPaneDraft,
+    paneFilterDrafts,
+    paneLiveStates,
+    recordsByServiceId,
+    servicesById,
+    paneByTerminalTabId,
+    setPaneLiveStates,
+  })
 
-  useEffect(() => {
-    logViewerWorkspaceCache.services = services
-  }, [services])
-
-  useEffect(() => {
-    logViewerWorkspaceCache.panes = panes
-  }, [panes])
-
-  useEffect(() => {
-    logViewerWorkspaceCache.activePaneId = activePaneId
-  }, [activePaneId])
-
-  useEffect(() => {
-    logViewerWorkspaceCache.runCommands = runCommands
-  }, [runCommands])
-
-  useEffect(() => {
-    logViewerWorkspaceCache.logSources = logSources
-  }, [logSources])
-
-  useEffect(() => {
-    logViewerWorkspaceCache.projectSetup = projectSetup
-  }, [projectSetup])
-
-  useEffect(() => {
-    logViewerWorkspaceCache.addPaneDraft = addPaneDraft
-  }, [addPaneDraft])
-
-  useEffect(() => {
-    logViewerWorkspaceCache.paneFilterDrafts = paneFilterDrafts
-  }, [paneFilterDrafts])
-
-  useEffect(() => {
-    logViewerWorkspaceCache.paneLiveStates = paneLiveStates
-  }, [paneLiveStates])
-
-  useEffect(() => {
-    logViewerWorkspaceCache.recordsByServiceId = recordsByServiceId
-  }, [recordsByServiceId])
-
-  useEffect(() => {
-    panesRef.current = panes
-  }, [panes])
-
-  useEffect(() => {
-    paneLiveStatesRef.current = paneLiveStates
-  }, [paneLiveStates])
-
-  useEffect(() => {
-    servicesByIdRef.current = servicesById
-  }, [servicesById])
-
-  useEffect(() => {
-    paneByTerminalTabIdRef.current = paneByTerminalTabId
-  }, [paneByTerminalTabId])
-
-  const isServiceLive = (serviceId: string) =>
-    panesRef.current.some(
-      (pane) => pane.serviceId === serviceId && (paneLiveStatesRef.current[pane.id] ?? false),
-    )
-
-  useEffect(() => {
-    if (!isTauriRuntime()) return
-
-    let unlistenBatch: (() => void) | undefined
-    let unlistenStatus: (() => void) | undefined
-    let disposed = false
-
-    const attachListeners = async () => {
-      const { listen } = await import("@tauri-apps/api/event")
-      const batchUnlisten = await listen<ILogBatchPayload>("log:batch", (event) => {
-        const payload = event.payload
-        const service = servicesByIdRef.current[payload.source_id]
-        if (!service) return
-        if (!isServiceLive(payload.source_id)) return
-
-        setRecordsByServiceId((prev) => {
-          const current = prev[payload.source_id] ?? []
-          const appended = payload.entries.map((entry) => ({
-            id: entry.id,
-            serviceId: payload.source_id,
-            timestamp: entry.timestamp,
-            level: entry.level,
-            parserType: entry.parser_type ?? service.parserType,
-            sourceType: service.sourceType,
-            message: entry.message,
-            raw: entry.raw,
-            fields: entry.fields ?? {},
-          }))
-          const nextRecords = appendLatestRecords(current, appended, MAX_RECORDS_FRONTEND)
-          return {
-            ...prev,
-            [payload.source_id]: nextRecords,
-          }
-        })
-      })
-
-      const statusUnlisten = await listen<ISourceStatusPayload>("source-status", (event) => {
-        const payload = event.payload
-        setPanes((prev) =>
-          prev.map((pane) =>
-            pane.serviceId === payload.source_id ? { ...pane, status: payload.status } : pane,
-          ),
-        )
-        setRunCommands((prev) =>
-          prev.map((runCommandEntry) => {
-            if (runCommandEntry.id !== payload.source_id) return runCommandEntry
-            if (payload.status === "running") return { ...runCommandEntry, status: "running" }
-            if (payload.status === "paused") return { ...runCommandEntry, status: "paused" }
-            if (payload.status === "error") return { ...runCommandEntry, status: "error" }
-            return { ...runCommandEntry, status: "idle" }
-          }),
-        )
-      })
-
-      if (disposed) {
-        batchUnlisten()
-        statusUnlisten()
-        return
-      }
-
-      unlistenBatch = batchUnlisten
-      unlistenStatus = statusUnlisten
-    }
-
-    void attachListeners()
-
-    return () => {
-      disposed = true
-      unlistenBatch?.()
-      unlistenStatus?.()
-    }
-  }, [])
-
-  const previousActivePaneIdRef = useRef<string>("")
-  useEffect(() => {
-    if (!activePaneId) return
-    setPaneLiveStates((prev) => {
-      const next = { ...prev }
-      const previousPaneId = previousActivePaneIdRef.current
-      if (previousPaneId && previousPaneId !== activePaneId) {
-        next[previousPaneId] = false
-      }
-      if (next[activePaneId] === undefined) {
-        next[activePaneId] = true
-      }
-      return next
-    })
-    previousActivePaneIdRef.current = activePaneId
-  }, [activePaneId])
-
-  // ── PTY structured ingest (JSON + Nginx) ───────────────────────────────────
-  // Feeds PTY terminal output into the log viewer.
-  // Only structured logs (JSON or Nginx combined) are accepted.
-  useEffect(() => {
-    if (!isTauriRuntime()) return
-
-    let unlistenPtyOutput: (() => void) | undefined
-    let disposed = false
-
-    const attachListener = async () => {
-      const { listen } = await import("@tauri-apps/api/event")
-      const unlisten = await listen<IPtyOutputPayload>("pty-output", (event) => {
-        const payload = event.payload
-        const pane = paneByTerminalTabIdRef.current[payload.tab_id]
-        if (!pane) return
-        if (!(paneLiveStatesRef.current[pane.id] ?? false)) return
-
-        const service = servicesByIdRef.current[pane.serviceId]
-        if (!service) return
-
-        const decodedChunk = new TextDecoder().decode(decodeBase64ToBytes(payload.data))
-        const buffered = `${ptyChunkBufferRef.current[payload.tab_id] ?? ""}${decodedChunk}`
-        const lines = buffered.split(/\r?\n/)
-        const rest = lines.pop() ?? ""
-        ptyChunkBufferRef.current[payload.tab_id] = rest
-
-        const records: ILogRecord[] = []
-        for (const line of lines) {
-          const extracted = extractJsonOnly(line)
-          if (extracted) {
-            records.push(
-              buildJsonRecordFromPty(
-                service.id,
-                service.sourceType,
-                extracted.parsed,
-                extracted.cleanedLine,
-              ),
-            )
-            continue
-          }
-
-          const nginxRecord = buildNginxRecordFromPty(service.id, service.sourceType, line)
-          if (nginxRecord) {
-            records.push(nginxRecord)
-          }
-        }
-
-        if (records.length === 0) return
-
-        setRecordsByServiceId((prev) => {
-          const current = prev[service.id] ?? []
-          const next = appendLatestRecords(current, records, MAX_RECORDS_FRONTEND)
-          return { ...prev, [service.id]: next }
-        })
-      })
-
-      if (disposed) { unlisten(); return }
-      unlistenPtyOutput = unlisten
-    }
-
-    void attachListener()
-    return () => { disposed = true; unlistenPtyOutput?.() }
-  }, [])
+  useLogViewerStreamEffects({
+    panesRef,
+    paneLiveStatesRef,
+    servicesByIdRef,
+    paneByTerminalTabIdRef,
+    ptyChunkBufferRef,
+    setRecordsByServiceId,
+    setPanes,
+    setRunCommands,
+  })
 
   const updatePaneFilters = (paneId: string, filters: ILogPaneFilters) => {
     setPanes((prev) => prev.map((pane) => (pane.id === paneId ? { ...pane, filters } : pane)))
@@ -753,6 +390,19 @@ export function useLogViewerWorkspace() {
     }
   }
 
+  const reorderPanes = (sourcePaneId: string, targetPaneId: string) => {
+    if (sourcePaneId === targetPaneId) return
+    setPanes((prevPanes) => {
+      const sourceIndex = prevPanes.findIndex((pane) => pane.id === sourcePaneId)
+      const targetIndex = prevPanes.findIndex((pane) => pane.id === targetPaneId)
+      if (sourceIndex < 0 || targetIndex < 0) return prevPanes
+      const nextPanes = [...prevPanes]
+      const [movingPane] = nextPanes.splice(sourceIndex, 1)
+      nextPanes.splice(targetIndex, 0, movingPane)
+      return nextPanes
+    })
+  }
+
   const runAllCommands = () => {
     if (!isTauriRuntime()) {
       setRunCommands((prev) => prev.map((runCommandEntry) => ({ ...runCommandEntry, status: "running" })))
@@ -769,7 +419,7 @@ export function useLogViewerWorkspace() {
               sourceId: runCommandEntry.id,
               command: runCommandEntry.command,
               cwd: runCommandEntry.cwd,
-              jsonOnly: true,
+              jsonOnly: false,
             })
           }
         } catch {
@@ -850,7 +500,7 @@ export function useLogViewerWorkspace() {
             sourceId: command.id,
             command: command.command,
             cwd: command.cwd,
-            jsonOnly: true,
+            jsonOnly: false,
           })
     void startCommand.then(() => {
       setRunCommands((prev) =>
@@ -885,7 +535,7 @@ export function useLogViewerWorkspace() {
     const normalizedTitle =
       addPaneDraft.runtimeTarget === "ssh"
         ? selectedSshHost?.name || `SSH Host ${nextPaneIndex}`
-        : folderName || projectSetup.projectName.trim() || `Project ${nextPaneIndex}`
+        : folderName || `Project ${nextPaneIndex}`
     const accentTones = ["blue", "green", "amber", "purple"] as const
     const isFileMode = projectSetup.logOutput === "file"
     const configuredFilePaths = projectSetup.fileLogPaths
@@ -1073,6 +723,7 @@ export function useLogViewerWorkspace() {
     setPaneService,
     updatePaneLogFiles,
     listSshRemoteEntries,
+    reorderPanes,
     closePaneConnection,
     updatePaneFilters,
     updatePaneFilterDraft,
@@ -1089,3 +740,5 @@ export function useLogViewerWorkspace() {
     getVisibleRecordsByPane,
   }
 }
+
+export const useLogViewerWorkspace = useLogViewer

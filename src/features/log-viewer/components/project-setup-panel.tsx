@@ -1,5 +1,4 @@
 import { Checkbox } from "@/shared/components/ui/checkbox"
-import { Input } from "@/shared/components/ui/input"
 import {
   Select,
   SelectContent,
@@ -19,12 +18,6 @@ export function ProjectSetupPanel({ setup, onChange }: ProjectSetupPanelProps) {
     <section className="rounded-xl border bg-card p-3">
       <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Project setup</p>
       <div className="mt-2 grid gap-2">
-        <Input
-          value={setup.projectName}
-          onChange={(event) => onChange({ projectName: event.target.value })}
-          placeholder="Project name"
-        />
-
         <div className="grid grid-cols-2 gap-2">
           <Select value={setup.stack} onValueChange={(value) => onChange({ stack: value as IProjectSetupState["stack"] })}>
             <SelectTrigger>

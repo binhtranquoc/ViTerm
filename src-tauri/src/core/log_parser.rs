@@ -20,6 +20,7 @@ pub fn parse_line(line: &str, source_id: &str) -> LogEntry {
         .or_else(|| parse_logfmt_log(cleaned, source_id))
         .or_else(|| parse_nginx_log(cleaned, source_id))
         .or_else(|| parse_laravel_log(cleaned, source_id))
+        .or_else(|| parse_sqlserver_log(cleaned, source_id))
         .unwrap_or_else(|| parse_plain_log(cleaned, source_id))
 }
 
@@ -218,6 +219,88 @@ fn parse_nginx_log(line: &str, source_id: &str) -> Option<LogEntry> {
         message,
         raw,
         fields: extract_json_fields(&structured),
+    })
+}
+
+fn parse_sqlserver_log(line: &str, source_id: &str) -> Option<LogEntry> {
+    static SQLSERVER_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r#"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:[.,]\d+)?)\s+(?P<category>[A-Za-z][\w.-]*)\s+(?P<message>.+)$"#,
+        )
+        .expect("invalid sqlserver line regex")
+    });
+    static SQLSERVER_ERROR_DETAIL_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r#"(?i)Error:\s*(?P<error_code>\d+),\s*Severity:\s*(?P<severity>\d+),\s*State:\s*(?P<state>\d+)\.?"#,
+        )
+        .expect("invalid sqlserver detail regex")
+    });
+    static SQLSERVER_LOGIN_FAILED_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r#"(?i)^Login failed for user '(?P<username>[^']+)'\.\s*Reason:\s*(?P<reason>.+?)\s*\[CLIENT:\s*(?P<client>[^\]]+)\]"#,
+        )
+        .expect("invalid sqlserver login regex")
+    });
+
+    let captures = SQLSERVER_LINE_RE.captures(line)?;
+    let timestamp_raw = captures.name("timestamp")?.as_str().to_string();
+    let category = captures.name("category")?.as_str().to_string();
+    let message = captures.name("message")?.as_str().trim().to_string();
+
+    let mut fields = HashMap::new();
+    fields.insert("profile".to_string(), "sqlserver".to_string());
+    fields.insert("category".to_string(), category.clone());
+
+    let lower_message = message.to_lowercase();
+    let mut level = if lower_message.contains("error") || lower_message.contains("failed") {
+        LogLevel::Error
+    } else if lower_message.contains("warning") || lower_message.contains("warn") {
+        LogLevel::Warn
+    } else {
+        detect_level_from_text(&message)
+    };
+
+    if let Some(error_detail) = SQLSERVER_ERROR_DETAIL_RE.captures(&message) {
+        if let Some(error_code) = error_detail.name("error_code") {
+            fields.insert("error_code".to_string(), error_code.as_str().to_string());
+        }
+        if let Some(severity_text) = error_detail.name("severity") {
+            fields.insert("severity".to_string(), severity_text.as_str().to_string());
+            if let Ok(severity_value) = severity_text.as_str().parse::<u16>() {
+                if severity_value >= 11 {
+                    level = LogLevel::Error;
+                } else if severity_value >= 6 {
+                    level = LogLevel::Warn;
+                }
+            }
+        }
+        if let Some(state_text) = error_detail.name("state") {
+            fields.insert("state".to_string(), state_text.as_str().to_string());
+        }
+    }
+
+    if let Some(login_failed) = SQLSERVER_LOGIN_FAILED_RE.captures(&message) {
+        if let Some(username) = login_failed.name("username") {
+            fields.insert("username".to_string(), username.as_str().to_string());
+        }
+        if let Some(reason) = login_failed.name("reason") {
+            fields.insert("reason".to_string(), reason.as_str().trim().to_string());
+        }
+        if let Some(client) = login_failed.name("client") {
+            fields.insert("client".to_string(), client.as_str().trim().to_string());
+        }
+        level = LogLevel::Error;
+    }
+
+    Some(LogEntry {
+        id: Uuid::new_v4().to_string(),
+        source_id: source_id.to_string(),
+        timestamp: normalize_timestamp(timestamp_raw),
+        level,
+        parser_type: LogParserType::Text,
+        message: message.clone(),
+        raw: line.to_string(),
+        fields,
     })
 }
 

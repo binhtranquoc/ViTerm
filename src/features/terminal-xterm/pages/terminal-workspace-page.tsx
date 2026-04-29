@@ -26,6 +26,7 @@ import { HostForm } from "@/features/terminal-xterm/components/host-form"
 import { HostGrid } from "@/features/terminal-xterm/components/host-grid"
 import { useTerminalWorkspace } from "@/features/terminal-xterm/hooks/use-terminal-workspace"
 import { TabContextMenuChip } from "@/shared/app-components/common/tab-context-menu-chip"
+import { useSortableTabDnd } from "@/shared/hooks/use-sortable-tab-dnd"
 import { useMenuById } from "@/shared/hooks/use-menu-by-id"
 import { TerminalXterm } from "@/features/terminal-xterm/components/terminal-xterm"
 
@@ -33,6 +34,20 @@ export function TerminalWorkspacePage() {
   const workspace = useTerminalWorkspace()
   const hostMenu = useMenuById()
   const tabMenu = useMenuById()
+  const {
+    draggingItemId: draggingTabId,
+    dragPreview,
+    onItemPointerDown,
+    onItemPointerUp,
+  } = useSortableTabDnd({
+    itemIds: workspace.terminalTabs.map((tab) => tab.id),
+    onReorder: workspace.reorderTerminalTabs,
+    dataAttribute: "data-terminal-tab-id",
+    canStartDrag: (event) => !(event.target as HTMLElement).closest('button[aria-label="Close tab"]'),
+  })
+  const draggingTab = draggingTabId
+    ? workspace.terminalTabs.find((tab) => tab.id === draggingTabId) ?? null
+    : null
 
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col gap-3 overflow-hidden p-2">
@@ -43,40 +58,67 @@ export function TerminalWorkspacePage() {
             Home
           </Button>
           {workspace.terminalTabs.map((tab) => (
-            <TabContextMenuChip
+            <div
               key={tab.id}
-              id={tab.id}
-              title={tab.title}
-              icon={tab.kind === "terminal" ? <TerminalSquare className="h-3.5 w-3.5" /> : <Folder className="h-3.5 w-3.5" />}
-              isActive={workspace.activeWorkspaceTab === tab.id}
-              isMenuOpen={tabMenu.openId === tab.id}
-              onMenuOpenChange={tabMenu.onOpenChange}
-              onActivate={workspace.setActiveWorkspaceTab}
-              onOpenContextMenu={tabMenu.openById}
-              onClose={workspace.closeTerminalTab}
-              menuContent={
-                <>
-                  <DropdownMenuItem onClick={() => { workspace.setActiveWorkspaceTab(tab.id); tabMenu.close() }}>
-                    <Link2 className="h-4 w-4" />
-                    Connect
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => { workspace.duplicateTerminalTab(tab.id); tabMenu.close() }}>
-                    <Copy className="h-4 w-4" />
-                    Duplicate tab
-                  </DropdownMenuItem>
-                  <DropdownMenuItem variant="destructive" onClick={() => { workspace.closeTerminalTab(tab.id); tabMenu.close() }}>
-                    <X className="h-4 w-4" />
-                    Close
-                  </DropdownMenuItem>
-                </>
-              }
-            />
+              data-terminal-tab-id={tab.id}
+              className={`${draggingTabId ? "cursor-grabbing" : "cursor-grab"} ${
+                draggingTabId === tab.id ? "scale-95 opacity-30" : ""
+              }`}
+              onPointerDown={(event) => {
+                onItemPointerDown(event, tab.id)
+              }}
+              onPointerUp={() => {
+                onItemPointerUp()
+              }}
+            >
+              <TabContextMenuChip
+                id={tab.id}
+                title={tab.title}
+                icon={tab.kind === "terminal" ? <TerminalSquare className="h-3.5 w-3.5" /> : <Folder className="h-3.5 w-3.5" />}
+                isActive={workspace.activeWorkspaceTab === tab.id}
+                isMenuOpen={tabMenu.openId === tab.id}
+                onMenuOpenChange={tabMenu.onOpenChange}
+                onActivate={workspace.setActiveWorkspaceTab}
+                onOpenContextMenu={tabMenu.openById}
+                onClose={workspace.closeTerminalTab}
+                menuContent={
+                  <>
+                    <DropdownMenuItem onClick={() => { workspace.setActiveWorkspaceTab(tab.id); tabMenu.close() }}>
+                      <Link2 className="h-4 w-4" />
+                      Connect
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => { workspace.duplicateTerminalTab(tab.id); tabMenu.close() }}>
+                      <Copy className="h-4 w-4" />
+                      Duplicate tab
+                    </DropdownMenuItem>
+                    <DropdownMenuItem variant="destructive" onClick={() => { workspace.closeTerminalTab(tab.id); tabMenu.close() }}>
+                      <X className="h-4 w-4" />
+                      Close
+                    </DropdownMenuItem>
+                  </>
+                }
+              />
+            </div>
           ))}
           <button type="button" aria-label="Create new tab" className="ml-auto flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-background text-muted-foreground transition-colors hover:bg-muted hover:text-foreground" onClick={() => workspace.setIsQuickAddOpen(true)}>
             <Plus className="h-4 w-4" />
           </button>
         </div>
       </div>
+      {dragPreview && draggingTab ? (
+        <div
+          className="pointer-events-none fixed z-50"
+          style={{
+            left: dragPreview.pointerX - dragPreview.offsetX,
+            top: dragPreview.pointerY - dragPreview.offsetY,
+          }}
+        >
+          <div className="group flex h-8 shrink-0 items-center gap-1 rounded-md border border-primary/40 bg-background/95 px-1.5 text-foreground shadow-lg backdrop-blur-sm">
+            {draggingTab.kind === "terminal" ? <TerminalSquare className="h-3.5 w-3.5" /> : <Folder className="h-3.5 w-3.5" />}
+            <span>{draggingTab.title}</span>
+          </div>
+        </div>
+      ) : null}
 
       <AlertDialog open={!!workspace.deleteTarget} onOpenChange={(open) => { if (!open) workspace.setDeleteTarget(null) }}>
         <AlertDialogContent>
