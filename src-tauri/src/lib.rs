@@ -13,7 +13,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::clipboard_cmd::write_clipboard_text,
             commands::file_log_cmd::start_file_log_stream,
+            commands::file_log_cmd::start_file_log_streams,
             commands::file_log_cmd::stop_file_log_stream,
+            commands::file_log_cmd::stop_file_log_streams,
             commands::process_cmd::spawn_process,
             commands::process_cmd::stop_process,
             commands::process_cmd::send_process_input,
@@ -23,13 +25,19 @@ pub fn run() {
             commands::pty_cmd::write_pty,
             commands::pty_cmd::resize_pty,
             commands::pty_cmd::close_pty,
+            commands::pty_cmd::force_close_pty_tab,
             commands::ssh_host_cmd::list_ssh_hosts,
             commands::ssh_host_cmd::list_ssh_groups,
             commands::ssh_host_cmd::create_ssh_host,
             commands::ssh_host_cmd::update_ssh_host,
             commands::ssh_host_cmd::delete_ssh_host,
             commands::ssh_host_cmd::get_ssh_host_secrets,
+            commands::ssh_host_cmd::list_ssh_remote_entries,
+            commands::ssh_host_cmd::start_ssh_file_log_streams,
+            commands::ssh_host_cmd::stop_ssh_file_log_streams,
+            commands::ssh_host_cmd::update_ssh_file_log_paths,
             commands::ssh_host_cmd::open_ssh_host_terminal,
+            commands::ssh_host_cmd::stop_ssh_host_terminal,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

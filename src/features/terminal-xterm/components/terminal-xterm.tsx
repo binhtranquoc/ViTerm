@@ -18,14 +18,23 @@ interface Props {
   tabId: string
   isActive: boolean
   cwd?: string
-  /** When set, the terminal uses open_ssh_host_terminal for automatic auth */
   hostId?: string
   startupProgram?: string
   startupArgs?: string[]
   reconnectNonce?: number
   onRequestEditHost?: (hostId: string, tabId: string) => void
   contentPadding?: number
+  keepSessionOnUnmount?: boolean
 }
+
+interface ITerminalSessionSnapshot {
+  hostId?: string
+  instanceId?: string
+}
+
+const terminalSessionRegistry = new Map<string, ITerminalSessionSnapshot>()
+const terminalOutputSnapshot = new Map<string, string>()
+const TERMINAL_OUTPUT_SNAPSHOT_MAX_CHARS = 200_000
 
 export function TerminalXterm({
   tabId,
@@ -37,6 +46,7 @@ export function TerminalXterm({
   reconnectNonce = 0,
   onRequestEditHost,
   contentPadding = 0,
+  keepSessionOnUnmount = false,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
@@ -68,9 +78,9 @@ export function TerminalXterm({
   useEffect(() => {
     if (!containerRef.current) return
     if (!xtermModulesResource.data) return
-
     let cancelled = false
     let unlistenEvent: (() => void) | undefined
+    let hasUnlistened = false
     let instanceId: string | null = null
     let hasReportedSshFailure = false
 
@@ -78,6 +88,18 @@ export function TerminalXterm({
       hasReportedSshFailure = true
       setConnectionState("failed")
       setConnectError(reason.trim() || "SSH connection failed")
+    }
+
+    const safeUnlisten = (fn?: () => void) => {
+      if (!fn || hasUnlistened) return
+      hasUnlistened = true
+      try {
+        Promise.resolve(fn()).catch((error) => {
+          void error
+        })
+      } catch (error) {
+        void error
+      }
     }
 
     const init = async () => {
@@ -124,6 +146,11 @@ export function TerminalXterm({
       termRef.current = term
       fitRef.current = fitAddon
 
+      const existingOutput = terminalOutputSnapshot.get(tabId)
+      if (existingOutput) {
+        term.write(existingOutput)
+      }
+
       if (!isTauriRuntime()) {
         term.write(
           "\x1b[33m[dev mode]\x1b[0m Terminal requires Tauri runtime.\r\n" +
@@ -134,21 +161,44 @@ export function TerminalXterm({
 
       // Open the PTY session — receive instanceId for safe cleanup
       try {
-        if (hostId) {
-          instanceId = await invokeTauri<string>("open_ssh_host_terminal", {
-            hostId,
-            tabId,
-            cols: term.cols,
-            rows: term.rows,
-          })
+        const existing = terminalSessionRegistry.get(tabId)
+        const canReuseSession = !!existing && (existing.hostId ?? "") === (hostId ?? "")
+        if (existing && canReuseSession) {
+          instanceId = existing.instanceId ?? null
+          if (hostId) {
+            setConnectionState("connected")
+            setConnectError("")
+          }
         } else {
-          instanceId = await invokeTauri<string>("open_pty", {
-            tabId,
-            cwd,
-            program: startupProgram,
-            args: startupArgs,
-            cols: term.cols,
-            rows: term.rows,
+          if (hostId) {
+            instanceId = await invokeTauri<string>("open_ssh_host_terminal", {
+              hostId,
+              tabId,
+              cols: term.cols,
+              rows: term.rows,
+            })
+          } else {
+            instanceId = await invokeTauri<string>("open_pty", {
+              tabId,
+              cwd,
+              program: startupProgram,
+              args: startupArgs,
+              cols: term.cols,
+              rows: term.rows,
+            })
+          }
+          if (cancelled) {
+            if (instanceId) {
+              if (hostId) {
+                void invokeTauri("stop_ssh_host_terminal", { tabId }).catch(() => {})
+              }
+              void invokeTauri("close_pty", { tabId, instanceId }).catch(() => {})
+            }
+            return
+          }
+          terminalSessionRegistry.set(tabId, {
+            hostId,
+            instanceId: instanceId ?? undefined,
           })
         }
       } catch (err) {
@@ -161,7 +211,9 @@ export function TerminalXterm({
 
       // If StrictMode already unmounted us, close immediately
       if (cancelled) {
-        if (instanceId) void invokeTauri("close_pty", { tabId, instanceId })
+        if (!keepSessionOnUnmount && instanceId) {
+          void invokeTauri("close_pty", { tabId, instanceId })
+        }
         return
       }
 
@@ -174,9 +226,18 @@ export function TerminalXterm({
           if (event.payload.tab_id !== tabId) return
           const bytes = decodeBase64ToBytes(event.payload.data)
           term.write(bytes)
+          const chunkText = utf8Decoder.decode(bytes)
+          const previous = terminalOutputSnapshot.get(tabId) ?? ""
+          const merged = `${previous}${chunkText}`
+          terminalOutputSnapshot.set(
+            tabId,
+            merged.length > TERMINAL_OUTPUT_SNAPSHOT_MAX_CHARS
+              ? merged.slice(merged.length - TERMINAL_OUTPUT_SNAPSHOT_MAX_CHARS)
+              : merged,
+          )
 
           if (!hostId) return
-          const output = utf8Decoder.decode(bytes).toLowerCase()
+          const output = chunkText.toLowerCase()
           const hasFailureHint =
             output.includes("permission denied") ||
             output.includes("host key verification failed") ||
@@ -196,8 +257,10 @@ export function TerminalXterm({
       )
 
       if (cancelled) {
-        unlisten()
-        if (instanceId) void invokeTauri("close_pty", { tabId, instanceId })
+        safeUnlisten(unlisten)
+        if (!keepSessionOnUnmount && instanceId) {
+          void invokeTauri("close_pty", { tabId, instanceId })
+        }
         return
       }
 
@@ -248,19 +311,29 @@ export function TerminalXterm({
       cancelled = true
       if (rafId !== undefined) cancelAnimationFrame(rafId)
       observer?.disconnect()
-      unlistenEvent?.()
+      safeUnlisten(unlistenEvent)
       clearPendingInputBatch()
       termRef.current?.dispose()
       termRef.current = null
       fitRef.current = null
-      // Only close the PTY if we actually opened it (instanceId is set).
-      // Passing instanceId prevents stale cleanups from killing a newer session.
-      if (isTauriRuntime() && instanceId) {
-        void invokeTauri("close_pty", { tabId, instanceId })
+      // Important: open_ssh_host_terminal registers a reconnect session in
+      // ssh_session_manager keyed by tabId. If we only close_pty, that
+      // reconnect loop can still revive and attach SSH unexpectedly.
+      if (!keepSessionOnUnmount) {
+        terminalSessionRegistry.delete(tabId)
+        terminalOutputSnapshot.delete(tabId)
+        if (isTauriRuntime() && hostId) {
+          void invokeTauri("stop_ssh_host_terminal", { tabId })
+        }
+        // Only close the PTY if we actually opened it (instanceId is set).
+        // Passing instanceId prevents stale cleanups from killing a newer session.
+        if (isTauriRuntime() && instanceId) {
+          void invokeTauri("close_pty", { tabId, instanceId })
+        }
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tabId, hostId, cwd, startupProgram, startupArgs, reconnectNonce, xtermModulesResource.data, sendToPty, clearPendingInputBatch, attachTextareaImeGuards])
+  }, [tabId, hostId, cwd, startupProgram, startupArgs, reconnectNonce, xtermModulesResource.data, sendToPty, clearPendingInputBatch, attachTextareaImeGuards, keepSessionOnUnmount])
 
   return (
     <div className="relative h-full w-full" style={{ padding: contentPadding }}>

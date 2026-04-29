@@ -40,6 +40,7 @@ pub async fn open_pty(
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
     let on_output = make_pty_output_callback(app_handle, tab_id.clone());
+    let on_exit = Arc::new(|_: String| {});
     state
         .pty_manager
         .open_pty(
@@ -52,6 +53,7 @@ pub async fn open_pty(
             cols,
             rows,
             on_output,
+            on_exit,
         )
         .await
 }
@@ -85,4 +87,12 @@ pub async fn close_pty(
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     state.pty_manager.close_pty(&tab_id, &instance_id).await
+}
+
+#[tauri::command]
+pub async fn force_close_pty_tab(
+    tab_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    state.pty_manager.close_tab_session(&tab_id).await
 }

@@ -7,7 +7,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{Mutex, mpsc};
 
-use crate::core::log_parser::parse_line;
+use crate::core::log_parser::{is_laravel_log_start, parse_line};
 use crate::models::log_entry::LogEntry;
 
 type LogBatchCallback = Arc<dyn Fn(Vec<LogEntry>) + Send + Sync>;
@@ -16,6 +16,8 @@ const INITIAL_READ_WINDOW_BYTES: u64 = 64 * 1024;
 const MAX_BATCH_SIZE: usize = 50;
 const MAX_PENDING_RECORDS: usize = 1000;
 const EMIT_INTERVAL_MS: u64 = 120;
+const IDLE_FLUSH_TICKS: u8 = 2;
+const MISSING_FILE_ERROR_TICKS: u8 = 8;
 
 #[derive(Clone, Default)]
 pub struct FileLogManager {
@@ -81,10 +83,19 @@ fn spawn_file_watcher_task(
         let mut initialized = false;
         let mut position = 0_u64;
         let mut pending_fragment = String::new();
+        let mut pending_laravel_entry: Option<String> = None;
+        let mut idle_ticks: u8 = 0;
+        let mut missing_file_ticks: u8 = 0;
+        let mut missing_status_emitted = false;
 
         while !stop_signal.load(Ordering::Relaxed) {
             match tokio::fs::metadata(&file_path).await {
                 Ok(metadata) => {
+                    missing_file_ticks = 0;
+                    if missing_status_emitted {
+                        on_status(source_id.clone(), "running".to_string());
+                        missing_status_emitted = false;
+                    }
                     if !initialized {
                         position = metadata.len().saturating_sub(INITIAL_READ_WINDOW_BYTES);
                         initialized = true;
@@ -93,9 +104,11 @@ fn spawn_file_watcher_task(
                     if metadata.len() < position {
                         position = 0;
                         pending_fragment.clear();
+                        pending_laravel_entry = None;
                     }
 
                     if metadata.len() > position {
+                        idle_ticks = 0;
                         match read_new_bytes(&file_path, position).await {
                             Ok((bytes, next_position)) => {
                                 position = next_position;
@@ -109,7 +122,31 @@ fn spawn_file_watcher_task(
                                     if trimmed.trim().is_empty() {
                                         continue;
                                     }
-                                    let entry = parse_line(trimmed, &source_id);
+                                    if is_laravel_log_start(trimmed) {
+                                        if let Some(previous_entry) =
+                                            pending_laravel_entry.replace(trimmed.to_string())
+                                        {
+                                            let mut entry = parse_line(&previous_entry, &source_id);
+                                            entry
+                                                .fields
+                                                .insert("log_file".to_string(), file_path.clone());
+                                            if tx.send(entry).is_err() {
+                                                break;
+                                            }
+                                        }
+                                        continue;
+                                    }
+
+                                    if let Some(current_entry) = pending_laravel_entry.as_mut() {
+                                        current_entry.push('\n');
+                                        current_entry.push_str(trimmed);
+                                        continue;
+                                    }
+
+                                    let mut entry = parse_line(trimmed, &source_id);
+                                    entry
+                                        .fields
+                                        .insert("log_file".to_string(), file_path.clone());
                                     if tx.send(entry).is_err() {
                                         break;
                                     }
@@ -122,13 +159,75 @@ fn spawn_file_watcher_task(
                                 return;
                             }
                         }
+                    } else {
+                        idle_ticks = idle_ticks.saturating_add(1);
+                        if idle_ticks >= IDLE_FLUSH_TICKS {
+                            if !pending_fragment.trim().is_empty() {
+                                let line = std::mem::take(&mut pending_fragment);
+                                let trimmed = line.trim_end_matches('\r').trim();
+                                if !trimmed.is_empty() {
+                                    if is_laravel_log_start(trimmed) {
+                                        if let Some(previous_entry) =
+                                            pending_laravel_entry.replace(trimmed.to_string())
+                                        {
+                                            let mut entry = parse_line(&previous_entry, &source_id);
+                                            entry
+                                                .fields
+                                                .insert("log_file".to_string(), file_path.clone());
+                                            if tx.send(entry).is_err() {
+                                                break;
+                                            }
+                                        }
+                                    } else if let Some(current_entry) = pending_laravel_entry.as_mut() {
+                                        current_entry.push('\n');
+                                        current_entry.push_str(trimmed);
+                                    } else {
+                                        let mut entry = parse_line(trimmed, &source_id);
+                                        entry
+                                            .fields
+                                            .insert("log_file".to_string(), file_path.clone());
+                                        if tx.send(entry).is_err() {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+
+                            if let Some(previous_entry) = pending_laravel_entry.take() {
+                                let mut entry = parse_line(&previous_entry, &source_id);
+                                entry
+                                    .fields
+                                    .insert("log_file".to_string(), file_path.clone());
+                                if tx.send(entry).is_err() {
+                                    break;
+                                }
+                            }
+                            idle_ticks = 0;
+                        }
                     }
                 }
-                Err(_) => {
+                Err(error) => {
                     initialized = false;
+                    missing_file_ticks = missing_file_ticks.saturating_add(1);
+                    if missing_file_ticks >= MISSING_FILE_ERROR_TICKS && !missing_status_emitted {
+                        on_status(source_id.clone(), "error".to_string());
+                        eprintln!(
+                            "[file-log-debug] metadata missing for source_id={} file_path={} error={}",
+                            source_id, file_path, error
+                        );
+                        missing_status_emitted = true;
+                    }
                 }
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+
+        if let Some(previous_entry) = pending_laravel_entry.take() {
+            let mut entry = parse_line(&previous_entry, &source_id);
+            entry
+                .fields
+                .insert("log_file".to_string(), file_path.clone());
+            let _ = tx.send(entry);
         }
 
         manager.cleanup(&source_id).await;

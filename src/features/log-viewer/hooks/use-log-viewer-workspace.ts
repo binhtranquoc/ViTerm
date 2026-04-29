@@ -1,27 +1,48 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { LOG_VIEWER_DEFAULT_FILTERS } from "@/features/log-viewer/constants/log-viewer.const"
+import { filterRecordsBySourceType } from "@/features/log-viewer/utils/log-filter.utils"
 import { useSshHosts } from "@/features/terminal-xterm/hooks/use-ssh-hosts"
 import { decodeBase64ToBytes } from "@/shared/lib/base64"
 import type {
+  IAddPaneDraft,
+  ICreatedPaneResult,
+  ILogBatchPayload,
   ILogPaneState,
   ILogPaneFilters,
   ILogRecord,
   ILogService,
+  ILogViewerWorkspaceCache,
+  IPtyOutputPayload,
   IProjectLogSource,
   IProjectSetupState,
   IProjectRunCommand,
+  ISourceStatusPayload,
+  ISshRemoteEntry,
 } from "@/features/log-viewer/interfaces/log-viewer.interfaces"
-
-interface IAddPaneDraft {
-  runtimeTarget: "local" | "ssh"
-  projectPath: string
-  sshHostId: string
-}
 
 const DEFAULT_ADD_PANE_DRAFT: IAddPaneDraft = {
   runtimeTarget: "local",
   projectPath: "",
   sshHostId: "",
+}
+
+const logViewerWorkspaceCache: ILogViewerWorkspaceCache = {
+  services: [],
+  panes: [],
+  activePaneId: "",
+  runCommands: [],
+  logSources: [],
+  projectSetup: {
+    projectName: "",
+    stack: "custom",
+    logOutput: "stdout",
+    combineFileLogs: false,
+    fileLogPaths: [],
+  },
+  addPaneDraft: DEFAULT_ADD_PANE_DRAFT,
+  paneFilterDrafts: {},
+  paneLiveStates: {},
+  recordsByServiceId: {},
 }
 
 const MAX_RECORDS_FRONTEND = 2000
@@ -37,37 +58,6 @@ const appendLatestRecords = <T,>(current: T[], incoming: T[], maxRecords: number
   return [...current.slice(overflow), ...incoming]
 }
 
-interface ITauriLogEntry {
-  id: string
-  source_id: string
-  timestamp: string
-  level: "error" | "warn" | "info" | "debug" | "unknown"
-  parser_type?: "json" | "text" | "nginx"
-  message: string
-  raw: string
-}
-
-interface ILogBatchPayload {
-  source_id: string
-  entries: ITauriLogEntry[]
-}
-
-interface ISourceStatusPayload {
-  source_id: string
-  status: "running" | "paused" | "stopped" | "error"
-}
-
-interface IPtyOutputPayload {
-  tab_id: string
-  data: string
-}
-
-interface ICreatedPaneResult {
-  paneId: string
-  paneTitle: string
-  projectPath: string
-}
-
 const invokeTauri = async <T,>(command: string, payload?: Record<string, unknown>): Promise<T> => {
   const { invoke } = await import("@tauri-apps/api/core")
   return invoke<T>(command, payload)
@@ -78,23 +68,12 @@ const isTauriRuntime = () =>
   ("__TAURI_INTERNALS__" in window || "__TAURI__" in window)
 
 const getProjectFolderName = (projectPath: string) => {
-  const normalized = projectPath.trim().replace(/\\/g, "/").replace(/\/+$/, "")
-  if (!normalized) return ""
-  const segments = normalized.split("/").filter(Boolean)
+  const normalizedProjectPath = projectPath.trim().replace(/\\/g, "/").replace(/\/+$/, "")
+  if (!normalizedProjectPath) return ""
+  const segments = normalizedProjectPath.split("/").filter(Boolean)
   return segments[segments.length - 1] ?? ""
 }
 
-const getDefaultFileLogPath = (
-  projectPath: string,
-  stack: IProjectSetupState["stack"],
-): string => {
-  const normalized = projectPath.trim().replace(/\/+$/, "")
-  if (!normalized) return "app.log"
-  if (stack === "laravel") return `${normalized}/storage/logs/laravel.log`
-  return `${normalized}/logs/app.log`
-}
-
-const LOG_VIEWER_DEBUG = false
 
 // ── PTY JSON-only extraction ─────────────────────────────────────────────────
 // Listens to pty-output from the terminal panel and extracts only valid JSON
@@ -123,7 +102,7 @@ const extractJsonOnly = (rawLine: string): { parsed: Record<string, unknown>; cl
         if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
           return { parsed: parsed as Record<string, unknown>, cleanedLine: slice.slice(0, end + 1) }
         }
-      } catch { /* not valid JSON */ }
+      } catch {}
     }
   }
   return null
@@ -161,6 +140,7 @@ const buildJsonRecordFromPty = (
     sourceType,
     message,
     raw,
+    fields: extractFlattenedFields(parsed),
   }
 }
 
@@ -212,29 +192,55 @@ const buildNginxRecordFromPty = (
     sourceType,
     message: `${method} ${path} -> ${status} (${structured.bytes}b)`,
     raw: JSON.stringify(structured),
+    fields: extractFlattenedFields(structured),
   }
+}
+
+const extractFlattenedFields = (value: unknown): Record<string, string> => {
+  const fields: Record<string, string> = {}
+  const walk = (current: unknown, prefix: string) => {
+    if (current === null || current === undefined) return
+    if (Array.isArray(current)) {
+      if (prefix.length > 0 && current.length > 0) {
+        fields[prefix] = JSON.stringify(current)
+      }
+      return
+    }
+    if (typeof current === "object") {
+      for (const [key, child] of Object.entries(current as Record<string, unknown>)) {
+        walk(child, prefix ? `${prefix}.${key}` : key)
+      }
+      return
+    }
+    if (prefix.length > 0) {
+      fields[prefix] = String(current)
+    }
+  }
+  walk(value, "")
+  return fields
 }
 
 export function useLogViewerWorkspace() {
   const sshHostsQuery = useSshHosts()
   const sshHosts = sshHostsQuery.data ?? []
-  const [services, setServices] = useState<ILogService[]>([])
-  const [panes, setPanes] = useState<ILogPaneState[]>([])
-  const [activePaneId, setActivePaneId] = useState("")
+  const [services, setServices] = useState<ILogService[]>(() => logViewerWorkspaceCache.services)
+  const [panes, setPanes] = useState<ILogPaneState[]>(() => logViewerWorkspaceCache.panes)
+  const [activePaneId, setActivePaneId] = useState(() => logViewerWorkspaceCache.activePaneId)
   const [showRestorePrompt, setShowRestorePrompt] = useState(false)
-  const [runCommands, setRunCommands] = useState<IProjectRunCommand[]>([])
-  const [logSources, setLogSources] = useState<IProjectLogSource[]>([])
-  const [projectSetup, setProjectSetup] = useState<IProjectSetupState>({
-    projectName: "",
-    stack: "custom",
-    logOutput: "stdout",
-    combineFileLogs: false,
-  })
+  const [runCommands, setRunCommands] = useState<IProjectRunCommand[]>(() => logViewerWorkspaceCache.runCommands)
+  const [logSources, setLogSources] = useState<IProjectLogSource[]>(() => logViewerWorkspaceCache.logSources)
+  const [projectSetup, setProjectSetup] = useState<IProjectSetupState>(() => logViewerWorkspaceCache.projectSetup)
   const [isAddPaneOpen, setIsAddPaneOpen] = useState(false)
-  const [addPaneDraft, setAddPaneDraft] = useState<IAddPaneDraft>(DEFAULT_ADD_PANE_DRAFT)
-  const [paneFilterDrafts, setPaneFilterDrafts] = useState<Record<string, ILogPaneFilters>>({})
-  const [paneLiveStates, setPaneLiveStates] = useState<Record<string, boolean>>({})
-  const [recordsByServiceId, setRecordsByServiceId] = useState<Record<string, ILogRecord[]>>({})
+  const [addPaneDraft, setAddPaneDraft] = useState<IAddPaneDraft>(() => logViewerWorkspaceCache.addPaneDraft)
+  const [paneFilterDrafts, setPaneFilterDrafts] = useState<Record<string, ILogPaneFilters>>(
+    () => logViewerWorkspaceCache.paneFilterDrafts,
+  )
+  const [paneLiveStates, setPaneLiveStates] = useState<Record<string, boolean>>(
+    () => logViewerWorkspaceCache.paneLiveStates,
+  )
+  const [recordsByServiceId, setRecordsByServiceId] = useState<Record<string, ILogRecord[]>>(
+    () => logViewerWorkspaceCache.recordsByServiceId,
+  )
   const ptyChunkBufferRef = useRef<Record<string, string>>({})
   const panesRef = useRef<ILogPaneState[]>([])
   const paneLiveStatesRef = useRef<Record<string, boolean>>({})
@@ -251,6 +257,46 @@ export function useLogViewerWorkspace() {
   )
   const servicesByIdRef = useRef(servicesById)
   const paneByTerminalTabIdRef = useRef(paneByTerminalTabId)
+
+  useEffect(() => {
+    logViewerWorkspaceCache.services = services
+  }, [services])
+
+  useEffect(() => {
+    logViewerWorkspaceCache.panes = panes
+  }, [panes])
+
+  useEffect(() => {
+    logViewerWorkspaceCache.activePaneId = activePaneId
+  }, [activePaneId])
+
+  useEffect(() => {
+    logViewerWorkspaceCache.runCommands = runCommands
+  }, [runCommands])
+
+  useEffect(() => {
+    logViewerWorkspaceCache.logSources = logSources
+  }, [logSources])
+
+  useEffect(() => {
+    logViewerWorkspaceCache.projectSetup = projectSetup
+  }, [projectSetup])
+
+  useEffect(() => {
+    logViewerWorkspaceCache.addPaneDraft = addPaneDraft
+  }, [addPaneDraft])
+
+  useEffect(() => {
+    logViewerWorkspaceCache.paneFilterDrafts = paneFilterDrafts
+  }, [paneFilterDrafts])
+
+  useEffect(() => {
+    logViewerWorkspaceCache.paneLiveStates = paneLiveStates
+  }, [paneLiveStates])
+
+  useEffect(() => {
+    logViewerWorkspaceCache.recordsByServiceId = recordsByServiceId
+  }, [recordsByServiceId])
 
   useEffect(() => {
     panesRef.current = panes
@@ -284,16 +330,7 @@ export function useLogViewerWorkspace() {
       const { listen } = await import("@tauri-apps/api/event")
       const batchUnlisten = await listen<ILogBatchPayload>("log:batch", (event) => {
         const payload = event.payload
-        const service = servicesById[payload.source_id]
-        if (LOG_VIEWER_DEBUG) {
-          console.log("[log-viewer] incoming batch", {
-            sourceId: payload.source_id,
-            entries: payload.entries.length,
-            hasService: Boolean(service),
-            isLive: isServiceLive(payload.source_id),
-            firstEntry: payload.entries[0],
-          })
-        }
+        const service = servicesByIdRef.current[payload.source_id]
         if (!service) return
         if (!isServiceLive(payload.source_id)) return
 
@@ -308,16 +345,9 @@ export function useLogViewerWorkspace() {
             sourceType: service.sourceType,
             message: entry.message,
             raw: entry.raw,
+            fields: entry.fields ?? {},
           }))
           const nextRecords = appendLatestRecords(current, appended, MAX_RECORDS_FRONTEND)
-          if (LOG_VIEWER_DEBUG) {
-            console.log("[log-viewer] records appended", {
-              sourceId: payload.source_id,
-              currentCount: current.length,
-              appendedCount: appended.length,
-              nextCount: nextRecords.length,
-            })
-          }
           return {
             ...prev,
             [payload.source_id]: nextRecords,
@@ -327,21 +357,18 @@ export function useLogViewerWorkspace() {
 
       const statusUnlisten = await listen<ISourceStatusPayload>("source-status", (event) => {
         const payload = event.payload
-        if (LOG_VIEWER_DEBUG) {
-          console.log("[log-viewer] source status", payload)
-        }
         setPanes((prev) =>
           prev.map((pane) =>
             pane.serviceId === payload.source_id ? { ...pane, status: payload.status } : pane,
           ),
         )
         setRunCommands((prev) =>
-          prev.map((item) => {
-            if (item.id !== payload.source_id) return item
-            if (payload.status === "running") return { ...item, status: "running" }
-            if (payload.status === "paused") return { ...item, status: "paused" }
-            if (payload.status === "error") return { ...item, status: "error" }
-            return { ...item, status: "idle" }
+          prev.map((runCommandEntry) => {
+            if (runCommandEntry.id !== payload.source_id) return runCommandEntry
+            if (payload.status === "running") return { ...runCommandEntry, status: "running" }
+            if (payload.status === "paused") return { ...runCommandEntry, status: "paused" }
+            if (payload.status === "error") return { ...runCommandEntry, status: "error" }
+            return { ...runCommandEntry, status: "idle" }
           }),
         )
       })
@@ -431,14 +458,6 @@ export function useLogViewerWorkspace() {
 
         if (records.length === 0) return
 
-        if (LOG_VIEWER_DEBUG) {
-          console.log("[log-viewer] pty structured records", {
-            tabId: payload.tab_id,
-            count: records.length,
-            sample: records[0],
-          })
-        }
-
         setRecordsByServiceId((prev) => {
           const current = prev[service.id] ?? []
           const next = appendLatestRecords(current, records, MAX_RECORDS_FRONTEND)
@@ -476,19 +495,21 @@ export function useLogViewerWorkspace() {
 
   const setPaneLiveMode = (paneId: string, isLive: boolean) => {
     setPaneLiveStates((prev) => ({ ...prev, [paneId]: isLive }))
-    const pane = panes.find((item) => item.id === paneId)
-    if (!pane || !isTauriRuntime()) return
-    const runCommand = runCommands.find((item) => item.id === pane.serviceId)
+    const selectedPane = panes.find((paneEntry) => paneEntry.id === paneId)
+    if (!selectedPane || !isTauriRuntime()) return
+    const runCommand = runCommands.find((runCommandEntry) => runCommandEntry.id === selectedPane.serviceId)
     if (!runCommand) return
     if (runCommand.sourceType === "file") return
 
     void invokeTauri(isLive ? "resume_process" : "pause_process", {
-      sourceId: pane.serviceId,
+      sourceId: selectedPane.serviceId,
     })
       .then(() => {
         setPanes((prev) =>
-          prev.map((item) =>
-            item.id === paneId ? { ...item, status: isLive ? "running" : "paused" } : item,
+          prev.map((paneEntry) =>
+            paneEntry.id === paneId
+              ? { ...paneEntry, status: isLive ? "running" : "paused" }
+              : paneEntry,
           ),
         )
       })
@@ -497,6 +518,179 @@ export function useLogViewerWorkspace() {
 
   const setPaneService = (paneId: string, serviceId: string) => {
     setPanes((prev) => prev.map((pane) => (pane.id === paneId ? { ...pane, serviceId } : pane)))
+  }
+
+  const getEffectiveFilePaths = (command: IProjectRunCommand) => {
+    const filePathList = command.filePaths?.map((filePath) => filePath.trim()).filter(Boolean) ?? []
+    if (filePathList.length > 0) return filePathList
+    const single = command.filePath?.trim()
+    return single ? [single] : []
+  }
+
+  const startFileCommand = async (command: IProjectRunCommand, service?: ILogService) => {
+    const filePaths = getEffectiveFilePaths(command)
+    if (filePaths.length === 0) throw new Error("missing file path")
+    if (service?.runtimeTarget === "ssh" && service.sshHostId) {
+      await invokeTauri("start_ssh_file_log_streams", {
+        sourceId: command.id,
+        hostId: service.sshHostId,
+        filePaths,
+      })
+      return
+    }
+    if (filePaths.length === 1) {
+      await invokeTauri("start_file_log_stream", {
+        sourceId: command.id,
+        filePath: filePaths[0],
+      })
+      return
+    }
+    await invokeTauri("start_file_log_streams", {
+      sourceId: command.id,
+      filePaths,
+    })
+  }
+
+  const stopFileCommand = async (command: IProjectRunCommand, service?: ILogService) => {
+    if (service?.runtimeTarget === "ssh") {
+      await invokeTauri("stop_ssh_file_log_streams", { sourceId: command.id })
+      return
+    }
+    const filePaths = getEffectiveFilePaths(command)
+    if (filePaths.length > 1) {
+      await invokeTauri("stop_file_log_streams", { sourceId: command.id })
+      return
+    }
+    await invokeTauri("stop_file_log_stream", { sourceId: command.id })
+  }
+
+  const updatePaneLogFiles = async (paneId: string, nextPaths: string[]) => {
+    const targetPane = panesRef.current.find((paneEntry) => paneEntry.id === paneId)
+    if (!targetPane) throw new Error("Pane not found")
+    const service = servicesByIdRef.current[targetPane.serviceId]
+    if (!service) throw new Error("Service not found")
+
+    const normalizedPaths = Array.from(new Set(nextPaths.map((nextPath) => nextPath.trim()).filter(Boolean)))
+    if (normalizedPaths.length === 0) throw new Error("Please select at least one log file")
+
+    const effectivePaths = normalizedPaths
+    const nextSourceLabel =
+      effectivePaths.length > 1 ? `${effectivePaths.length} log files` : effectivePaths[0]
+    const nextParserType =
+      projectSetup.stack === "laravel" ? "laravel" : "text"
+
+    setServices((prev) =>
+      prev.map((serviceEntry) =>
+        serviceEntry.id === service.id
+          ? {
+              ...serviceEntry,
+              sourceType: "file",
+              parserType: nextParserType,
+              filePath: effectivePaths[0],
+              filePaths: effectivePaths,
+              sourceLabel: nextSourceLabel,
+            }
+          : serviceEntry,
+      ),
+    )
+    setRunCommands((prev) =>
+      prev.map((runCommandEntry) =>
+        runCommandEntry.id === service.id
+          ? {
+              ...runCommandEntry,
+              sourceType: "file",
+              filePath: effectivePaths[0],
+              filePaths: effectivePaths,
+              command: `tail -f ${effectivePaths.join(" ")}`,
+            }
+          : runCommandEntry,
+      ),
+    )
+    setLogSources((prev) =>
+      prev.map((logSourceEntry) =>
+        logSourceEntry.name === service.title
+          ? {
+              ...logSourceEntry,
+              sourceType: "file",
+              parserType: nextParserType,
+              filePath: effectivePaths[0],
+            }
+          : logSourceEntry,
+      ),
+    )
+
+    const currentCommand = runCommands.find((runCommandEntry) => runCommandEntry.id === service.id)
+    if (!currentCommand || !isTauriRuntime()) return
+
+    const updatedCommand: IProjectRunCommand = {
+      ...currentCommand,
+      sourceType: "file",
+      filePath: effectivePaths[0],
+      filePaths: effectivePaths,
+      command: `tail -f ${effectivePaths.join(" ")}`,
+    }
+    try {
+      if (currentCommand.status === "running" || currentCommand.status === "paused") {
+        // For ssh + file-log, keep the existing SSH connection/PTY and only update file list.
+        if (service.runtimeTarget === "ssh" && currentCommand.sourceType === "file") {
+          await invokeTauri("update_ssh_file_log_paths", {
+            sourceId: currentCommand.id,
+            filePaths: effectivePaths,
+          })
+
+          setRunCommands((prev) =>
+            prev.map((runCommandEntry) =>
+              runCommandEntry.id === updatedCommand.id
+                ? { ...runCommandEntry, status: "running" }
+                : runCommandEntry,
+            ),
+          )
+          setPanes((prev) =>
+            prev.map((paneEntry) =>
+              paneEntry.id === paneId ? { ...paneEntry, status: "running" } : paneEntry,
+            ),
+          )
+          return
+        }
+
+        if (currentCommand.sourceType === "file") {
+          await stopFileCommand(currentCommand, service)
+        } else {
+          await invokeTauri("stop_process", { sourceId: currentCommand.id })
+        }
+      }
+
+      await startFileCommand(updatedCommand, service)
+      setRunCommands((prev) =>
+        prev.map((runCommandEntry) =>
+          runCommandEntry.id === updatedCommand.id
+            ? { ...runCommandEntry, status: "running" }
+            : runCommandEntry,
+        ),
+      )
+      setPanes((prev) =>
+        prev.map((paneEntry) => (paneEntry.id === paneId ? { ...paneEntry, status: "running" } : paneEntry)),
+      )
+    } catch {
+      setRunCommands((prev) =>
+        prev.map((runCommandEntry) =>
+          runCommandEntry.id === updatedCommand.id
+            ? { ...runCommandEntry, status: "error" }
+            : runCommandEntry,
+        ),
+      )
+      setPanes((prev) =>
+        prev.map((paneEntry) => (paneEntry.id === paneId ? { ...paneEntry, status: "error" } : paneEntry)),
+      )
+      throw new Error("Failed to reload file watchers")
+    }
+  }
+
+  const listSshRemoteEntries = async (hostId: string, path: string) => {
+    return invokeTauri<{ base_path: string; entries: ISshRemoteEntry[] }>("list_ssh_remote_entries", {
+      hostId,
+      path,
+    })
   }
 
   const closePaneConnection = (paneId: string) => {
@@ -531,19 +725,26 @@ export function useLogViewerWorkspace() {
       return next
     })
     if (isTauriRuntime()) {
-      const runCommand = runCommands.find((item) => item.id === paneToClose.serviceId)
+      void invokeTauri("stop_ssh_host_terminal", { tabId: paneToClose.terminalTabId }).catch(() => {})
+      void invokeTauri("force_close_pty_tab", { tabId: paneToClose.terminalTabId }).catch(() => {})
+    }
+    if (isTauriRuntime()) {
+      const runCommand = runCommands.find((runCommandEntry) => runCommandEntry.id === paneToClose.serviceId)
       if (runCommand) {
-        void invokeTauri(
-          runCommand.sourceType === "file" ? "stop_file_log_stream" : "stop_process",
-          { sourceId: paneToClose.serviceId },
-        )
+        if (runCommand.sourceType === "file") {
+          void stopFileCommand(runCommand, serviceToClose)
+        } else {
+          void invokeTauri("stop_process", { sourceId: paneToClose.serviceId })
+        }
       }
     }
 
     if (serviceToClose) {
       setServices((prev) => prev.filter((service) => service.id !== serviceToClose.id))
       setRunCommands((prev) => prev.filter((command) => command.id !== serviceToClose.id))
-      setLogSources((prev) => prev.filter((item) => item.name !== serviceToClose.title))
+      setLogSources((prev) =>
+        prev.filter((logSourceEntry) => logSourceEntry.name !== serviceToClose.title),
+      )
       setRecordsByServiceId((prev) => {
         const next = { ...prev }
         delete next[serviceToClose.id]
@@ -554,30 +755,30 @@ export function useLogViewerWorkspace() {
 
   const runAllCommands = () => {
     if (!isTauriRuntime()) {
-      setRunCommands((prev) => prev.map((item) => ({ ...item, status: "running" })))
+      setRunCommands((prev) => prev.map((runCommandEntry) => ({ ...runCommandEntry, status: "running" })))
       return
     }
 
     void Promise.all(
-      runCommands.map(async (item) => {
+      runCommands.map(async (runCommandEntry) => {
         try {
-          if (item.sourceType === "file") {
-            if (!item.filePath) throw new Error("missing file path")
-            await invokeTauri("start_file_log_stream", {
-              sourceId: item.id,
-              filePath: item.filePath,
-            })
+          if (runCommandEntry.sourceType === "file") {
+            await startFileCommand(runCommandEntry, servicesByIdRef.current[runCommandEntry.id])
           } else {
             await invokeTauri("spawn_process", {
-              sourceId: item.id,
-              command: item.command,
-              cwd: item.cwd,
+              sourceId: runCommandEntry.id,
+              command: runCommandEntry.command,
+              cwd: runCommandEntry.cwd,
               jsonOnly: true,
             })
           }
         } catch {
           setRunCommands((prev) =>
-            prev.map((current) => (current.id === item.id ? { ...current, status: "error" } : current)),
+            prev.map((currentRunCommand) =>
+              currentRunCommand.id === runCommandEntry.id
+                ? { ...currentRunCommand, status: "error" }
+                : currentRunCommand,
+            ),
           )
         }
       }),
@@ -586,39 +787,42 @@ export function useLogViewerWorkspace() {
 
   const stopAllCommands = () => {
     if (!isTauriRuntime()) {
-      setRunCommands((prev) => prev.map((item) => ({ ...item, status: "idle" })))
+      setRunCommands((prev) => prev.map((runCommandEntry) => ({ ...runCommandEntry, status: "idle" })))
       return
     }
 
     void Promise.all(
-      runCommands.map((item) =>
-        item.sourceType === "file"
-          ? invokeTauri("stop_file_log_stream", { sourceId: item.id })
-          : invokeTauri("stop_process", { sourceId: item.id }),
+      runCommands.map((runCommandEntry) =>
+        runCommandEntry.sourceType === "file"
+          ? stopFileCommand(runCommandEntry, servicesByIdRef.current[runCommandEntry.id])
+          : invokeTauri("stop_process", { sourceId: runCommandEntry.id }),
       ),
     )
       .then(() => {
-        setRunCommands((prev) => prev.map((item) => ({ ...item, status: "idle" })))
+        setRunCommands((prev) => prev.map((runCommandEntry) => ({ ...runCommandEntry, status: "idle" })))
         setPanes((prev) => prev.map((pane) => ({ ...pane, status: "stopped" })))
       })
       .catch(() => {
-        setRunCommands((prev) => prev.map((item) => ({ ...item, status: "error" })))
+        setRunCommands((prev) => prev.map((runCommandEntry) => ({ ...runCommandEntry, status: "error" })))
       })
   }
 
   const toggleCommandStatus = (commandId: string) => {
-    const command = runCommands.find((item) => item.id === commandId)
+    const command = runCommands.find((runCommandEntry) => runCommandEntry.id === commandId)
     if (!command) return
 
     if (!isTauriRuntime()) {
       setRunCommands((prev) =>
-        prev.map((item) =>
-          item.id === commandId
+        prev.map((runCommandEntry) =>
+          runCommandEntry.id === commandId
             ? {
-                ...item,
-                status: item.status === "running" || item.status === "paused" ? "idle" : "running",
+                ...runCommandEntry,
+                status:
+                  runCommandEntry.status === "running" || runCommandEntry.status === "paused"
+                    ? "idle"
+                    : "running",
               }
-            : item,
+            : runCommandEntry,
         ),
       )
       return
@@ -627,11 +831,13 @@ export function useLogViewerWorkspace() {
     if (command.status === "running" || command.status === "paused") {
       const stopCommand =
         command.sourceType === "file"
-          ? invokeTauri("stop_file_log_stream", { sourceId: command.id })
+          ? stopFileCommand(command, servicesByIdRef.current[command.id])
           : invokeTauri("stop_process", { sourceId: command.id })
       void stopCommand.then(() => {
         setRunCommands((prev) =>
-          prev.map((item) => (item.id === command.id ? { ...item, status: "idle" } : item)),
+          prev.map((runCommandEntry) =>
+            runCommandEntry.id === command.id ? { ...runCommandEntry, status: "idle" } : runCommandEntry,
+          ),
         )
       })
       return
@@ -639,9 +845,7 @@ export function useLogViewerWorkspace() {
 
     const startCommand =
       command.sourceType === "file"
-        ? command.filePath
-          ? invokeTauri("start_file_log_stream", { sourceId: command.id, filePath: command.filePath })
-          : Promise.reject(new Error("missing file path"))
+        ? startFileCommand(command, servicesByIdRef.current[command.id])
         : invokeTauri("spawn_process", {
             sourceId: command.id,
             command: command.command,
@@ -650,7 +854,9 @@ export function useLogViewerWorkspace() {
           })
     void startCommand.then(() => {
       setRunCommands((prev) =>
-        prev.map((item) => (item.id === command.id ? { ...item, status: "running" } : item)),
+        prev.map((runCommandEntry) =>
+          runCommandEntry.id === command.id ? { ...runCommandEntry, status: "running" } : runCommandEntry,
+        ),
       )
     })
   }
@@ -661,15 +867,20 @@ export function useLogViewerWorkspace() {
 
   const updateLogSourceMergeMode = (sourceId: string, mergeKey: IProjectLogSource["mergeKey"]) => {
     setLogSources((prev) =>
-      prev.map((item) => (item.id === sourceId ? { ...item, mergeKey } : item)),
+      prev.map((logSourceEntry) =>
+        logSourceEntry.id === sourceId ? { ...logSourceEntry, mergeKey } : logSourceEntry,
+      ),
     )
   }
 
   const addPaneFromDraft = (): ICreatedPaneResult => {
-    const nextPaneIndex = panes.length + 1
-    const nextPaneId = `pane-${nextPaneIndex}`
     const nextServiceId = `service-${Date.now()}`
+    const nextPaneId = `pane-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
+    const nextPaneIndex = panes.length + 1
     const selectedSshHost = sshHosts.find((host) => host.id === addPaneDraft.sshHostId)
+    if (addPaneDraft.runtimeTarget === "ssh" && !selectedSshHost) {
+      throw new Error("Please select an SSH host")
+    }
     const folderName = getProjectFolderName(addPaneDraft.projectPath)
     const normalizedTitle =
       addPaneDraft.runtimeTarget === "ssh"
@@ -677,10 +888,20 @@ export function useLogViewerWorkspace() {
         : folderName || projectSetup.projectName.trim() || `Project ${nextPaneIndex}`
     const accentTones = ["blue", "green", "amber", "purple"] as const
     const isFileMode = projectSetup.logOutput === "file"
-    const filePath =
-      addPaneDraft.runtimeTarget === "local"
-        ? getDefaultFileLogPath(addPaneDraft.projectPath, projectSetup.stack)
-        : ""
+    const configuredFilePaths = projectSetup.fileLogPaths
+      .map((filePath) => filePath.trim())
+      .filter((filePath) => filePath.length > 0)
+    const effectiveFilePaths = isFileMode
+      ? projectSetup.combineFileLogs
+        ? configuredFilePaths
+        : configuredFilePaths.slice(0, 1)
+      : []
+    const parserType =
+      isFileMode && projectSetup.stack === "laravel"
+        ? "laravel"
+        : isFileMode
+          ? "text"
+          : "json"
 
     const nextService = {
       id: nextServiceId,
@@ -688,11 +909,14 @@ export function useLogViewerWorkspace() {
       runtimeTarget: addPaneDraft.runtimeTarget,
       sshHostId: addPaneDraft.runtimeTarget === "ssh" ? addPaneDraft.sshHostId || undefined : undefined,
       sourceType: isFileMode ? "file" : "stdout",
-      parserType: isFileMode ? "text" : "json",
-      filePath: isFileMode ? filePath : undefined,
+      parserType,
+      filePath: isFileMode ? effectiveFilePaths[0] : undefined,
+      filePaths: isFileMode ? effectiveFilePaths : undefined,
       sourceLabel:
         isFileMode
-          ? filePath
+          ? effectiveFilePaths.length > 1
+            ? `${effectiveFilePaths.length} log files`
+            : effectiveFilePaths[0] ?? "file log (select later)"
           : addPaneDraft.runtimeTarget === "ssh"
           ? selectedSshHost
             ? `${selectedSshHost.username}@${selectedSshHost.host}:${selectedSshHost.port}`
@@ -702,7 +926,7 @@ export function useLogViewerWorkspace() {
 
     const nextPane = {
       id: nextPaneId,
-      terminalTabId: `log-pane-terminal-${nextPaneId}`,
+      terminalTabId: `log-pane-terminal-${nextServiceId}`,
       title: normalizedTitle,
       serviceId: nextServiceId,
       status: "stopped",
@@ -715,15 +939,15 @@ export function useLogViewerWorkspace() {
       ...prev,
       [nextPaneId]: { ...LOG_VIEWER_DEFAULT_FILTERS },
     }))
-    setPaneLiveStates((prev) => ({ ...prev, [nextPaneId]: false }))
+    setPaneLiveStates((prev) => ({ ...prev, [nextPaneId]: true }))
     setLogSources((prev) => [
       ...prev,
       {
         id: `src-${Date.now()}`,
         name: normalizedTitle,
         sourceType: isFileMode ? "file" : "stdout",
-        parserType: isFileMode ? "text" : "json",
-        filePath: isFileMode ? filePath : undefined,
+        parserType,
+        filePath: isFileMode ? effectiveFilePaths[0] : undefined,
         mergeKey: "separate",
       },
     ])
@@ -733,10 +957,15 @@ export function useLogViewerWorkspace() {
       {
         id: nextServiceId,
         name: normalizedTitle,
-        command: isFileMode ? `tail -f ${filePath}` : "npm run dev",
+        command: isFileMode
+          ? effectiveFilePaths.length > 0
+            ? `tail -f ${effectiveFilePaths.join(" ")}`
+            : "tail -f <select-log-file>"
+          : "npm run dev",
         cwd: addPaneDraft.projectPath || ".",
         sourceType: isFileMode ? "file" : "stdout",
-        filePath: isFileMode ? filePath : undefined,
+        filePath: isFileMode ? effectiveFilePaths[0] : undefined,
+        filePaths: isFileMode ? effectiveFilePaths : undefined,
         status: "idle",
       },
     ])
@@ -744,6 +973,46 @@ export function useLogViewerWorkspace() {
     setActivePaneId(nextPaneId)
     setIsAddPaneOpen(false)
     setAddPaneDraft(DEFAULT_ADD_PANE_DRAFT)
+
+    if (isTauriRuntime() && isFileMode && effectiveFilePaths.length > 0) {
+      const nextCommand: IProjectRunCommand = {
+        id: nextServiceId,
+        name: normalizedTitle,
+        command: `tail -f ${effectiveFilePaths.join(" ")}`,
+        cwd: addPaneDraft.projectPath || ".",
+        sourceType: "file",
+        filePath: effectiveFilePaths[0],
+        filePaths: effectiveFilePaths,
+        status: "idle",
+      }
+      void startFileCommand(nextCommand, nextService)
+        .then(() => {
+          setRunCommands((prev) =>
+            prev.map((runCommandEntry) =>
+              runCommandEntry.id === nextServiceId
+                ? { ...runCommandEntry, status: "running" }
+                : runCommandEntry,
+            ),
+          )
+          setPanes((prev) =>
+            prev.map((paneEntry) =>
+              paneEntry.id === nextPaneId ? { ...paneEntry, status: "running" } : paneEntry,
+            ),
+          )
+        })
+        .catch(() => {
+          setRunCommands((prev) =>
+            prev.map((runCommandEntry) =>
+              runCommandEntry.id === nextServiceId ? { ...runCommandEntry, status: "error" } : runCommandEntry,
+            ),
+          )
+          setPanes((prev) =>
+            prev.map((paneEntry) =>
+              paneEntry.id === nextPaneId ? { ...paneEntry, status: "error" } : paneEntry,
+            ),
+          )
+        })
+    }
 
     return {
       paneId: nextPaneId,
@@ -753,49 +1022,32 @@ export function useLogViewerWorkspace() {
           ? "~"
           : addPaneDraft.projectPath.trim() || ".",
     }
-
   }
 
   const getVisibleRecordsByPane = (paneId: string) => {
-    const pane = panes.find((item) => item.id === paneId)
-    if (!pane) return []
+    const selectedPane = panes.find((paneEntry) => paneEntry.id === paneId)
+    if (!selectedPane) return []
+    const service = servicesById[selectedPane.serviceId]
+    if (!service) return []
 
-    const paneRecords = recordsByServiceId[pane.serviceId] ?? []
-    const visibleRecords = paneRecords.filter((record) => {
-      if (record.serviceId !== pane.serviceId) return false
-      if (pane.filters.level !== "all" && record.level !== pane.filters.level) return false
-      if (pane.filters.sourceType !== "all" && record.sourceType !== pane.filters.sourceType) return false
-      if (pane.filters.parserType !== "all" && record.parserType !== pane.filters.parserType) return false
-      if (pane.filters.keyword.trim().length > 0) {
-        const keyword = pane.filters.keyword.toLowerCase()
-        return (
-          record.message.toLowerCase().includes(keyword) ||
-          record.raw.toLowerCase().includes(keyword)
-        )
-      }
-      return true
-    })
-    if (LOG_VIEWER_DEBUG) {
-      console.log("[log-viewer] filter result", {
-        paneId,
-        serviceId: pane.serviceId,
-        totalRecords: paneRecords.length,
-        visibleRecords: visibleRecords.length,
-        filters: pane.filters,
-        sampleRecord: paneRecords[0],
-      })
-    }
+    const paneRecords = recordsByServiceId[selectedPane.serviceId] ?? []
+    const recordsForPane = paneRecords.filter((record) => record.serviceId === selectedPane.serviceId)
+    const visibleRecords = filterRecordsBySourceType(
+      service.sourceType,
+      recordsForPane,
+      selectedPane.filters,
+    )
     return visibleRecords
   }
 
   const clearPaneLogs = (paneId: string) => {
-    const pane = panes.find((item) => item.id === paneId)
-    if (!pane) return
+    const selectedPane = panes.find((paneEntry) => paneEntry.id === paneId)
+    if (!selectedPane) return
     setRecordsByServiceId((prev) => ({
       ...prev,
-      [pane.serviceId]: [],
+      [selectedPane.serviceId]: [],
     }))
-    delete ptyChunkBufferRef.current[pane.terminalTabId]
+    delete ptyChunkBufferRef.current[selectedPane.terminalTabId]
   }
 
   return {
@@ -819,6 +1071,8 @@ export function useLogViewerWorkspace() {
     setAddPaneDraft,
     setActivePaneId,
     setPaneService,
+    updatePaneLogFiles,
+    listSshRemoteEntries,
     closePaneConnection,
     updatePaneFilters,
     updatePaneFilterDraft,

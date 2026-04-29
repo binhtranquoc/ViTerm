@@ -1,6 +1,7 @@
 use regex::Regex;
 use serde_json::json;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::LazyLock;
 use uuid::Uuid;
 
@@ -16,8 +17,67 @@ pub fn parse_line(line: &str, source_id: &str) -> LogEntry {
     }
 
     parse_json_log(cleaned, source_id)
+        .or_else(|| parse_logfmt_log(cleaned, source_id))
         .or_else(|| parse_nginx_log(cleaned, source_id))
+        .or_else(|| parse_laravel_log(cleaned, source_id))
         .unwrap_or_else(|| parse_plain_log(cleaned, source_id))
+}
+
+pub fn is_laravel_log_start(line: &str) -> bool {
+    static LARAVEL_START_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\s+[A-Za-z0-9_.-]+\.[A-Z]+:")
+            .expect("invalid laravel-start regex")
+    });
+    LARAVEL_START_RE.is_match(line)
+}
+
+fn parse_laravel_log(line: &str, source_id: &str) -> Option<LogEntry> {
+    static LARAVEL_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"(?s)^\[(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]\s+(?P<channel>[A-Za-z0-9_.-]+)\.(?P<level>[A-Z]+):\s*(?P<message>.*)$",
+        )
+        .expect("invalid laravel regex")
+    });
+    static EXCEPTION_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"([A-Za-z_\\][A-Za-z0-9_\\]+(?:Exception|Error))").expect("invalid exception regex")
+    });
+
+    let captures = LARAVEL_RE.captures(line)?;
+    let timestamp_raw = captures.name("timestamp")?.as_str().to_string();
+    let channel = captures.name("channel")?.as_str().to_string();
+    let level_raw = captures.name("level")?.as_str().to_lowercase();
+    let message = captures.name("message")?.as_str().trim().to_string();
+    let timestamp = normalize_timestamp(format!("{timestamp_raw}Z"));
+    let level = match level_raw.as_str() {
+        "error" | "critical" | "alert" | "emergency" => LogLevel::Error,
+        "warning" | "warn" => LogLevel::Warn,
+        "notice" | "info" => LogLevel::Info,
+        "debug" => LogLevel::Debug,
+        _ => LogLevel::Unknown,
+    };
+
+    let mut fields = extract_text_fields(&message);
+    fields.insert("profile".to_string(), "laravel".to_string());
+    fields.insert("channel".to_string(), channel.clone());
+    fields.insert("level".to_string(), level_raw);
+    if let Some(exception) = EXCEPTION_RE
+        .captures(&message)
+        .and_then(|caps| caps.get(1))
+        .map(|value| value.as_str().to_string())
+    {
+        fields.insert("exception".to_string(), exception);
+    }
+
+    Some(LogEntry {
+        id: Uuid::new_v4().to_string(),
+        source_id: source_id.to_string(),
+        timestamp,
+        level,
+        parser_type: LogParserType::Laravel,
+        message: message.clone(),
+        raw: line.to_string(),
+        fields,
+    })
 }
 
 fn parse_json_log(line: &str, source_id: &str) -> Option<LogEntry> {
@@ -36,6 +96,7 @@ fn parse_json_log(line: &str, source_id: &str) -> Option<LogEntry> {
         parser_type: LogParserType::Json,
         message,
         raw: line.to_string(),
+        fields: extract_json_fields(&value),
     })
 }
 
@@ -48,7 +109,48 @@ fn parse_plain_log(line: &str, source_id: &str) -> LogEntry {
         parser_type: LogParserType::Text,
         message: line.to_string(),
         raw: line.to_string(),
+        fields: extract_text_fields(line),
     }
+}
+
+fn parse_logfmt_log(line: &str, source_id: &str) -> Option<LogEntry> {
+    let fields = extract_text_fields(line);
+    if fields.len() < 2 {
+        return None;
+    }
+
+    let level = fields
+        .get("level")
+        .or_else(|| fields.get("lvl"))
+        .map(|value| detect_level_from_text(value))
+        .filter(|detected| !matches!(detected, LogLevel::Unknown))
+        .unwrap_or_else(|| detect_level_from_text(line));
+    let timestamp = fields
+        .get("time")
+        .or_else(|| fields.get("timestamp"))
+        .cloned()
+        .map(normalize_timestamp)
+        .unwrap_or_else(|| extract_timestamp_from_text(line));
+    let message = fields
+        .get("msg")
+        .or_else(|| fields.get("message"))
+        .or_else(|| fields.get("event"))
+        .cloned()
+        .unwrap_or_else(|| line.to_string());
+
+    let mut enriched_fields = fields;
+    enriched_fields.insert("profile".to_string(), "logfmt".to_string());
+
+    Some(LogEntry {
+        id: Uuid::new_v4().to_string(),
+        source_id: source_id.to_string(),
+        timestamp,
+        level,
+        parser_type: LogParserType::Logfmt,
+        message,
+        raw: line.to_string(),
+        fields: enriched_fields,
+    })
 }
 
 fn parse_nginx_log(line: &str, source_id: &str) -> Option<LogEntry> {
@@ -115,7 +217,75 @@ fn parse_nginx_log(line: &str, source_id: &str) -> Option<LogEntry> {
         parser_type: LogParserType::Nginx,
         message,
         raw,
+        fields: extract_json_fields(&structured),
     })
+}
+
+fn extract_json_fields(value: &Value) -> HashMap<String, String> {
+    let mut fields = HashMap::new();
+    flatten_json_fields("", value, &mut fields);
+    fields
+}
+
+fn flatten_json_fields(prefix: &str, value: &Value, fields: &mut HashMap<String, String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                let next_prefix = if prefix.is_empty() {
+                    key.to_string()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                flatten_json_fields(&next_prefix, child, fields);
+            }
+        }
+        Value::Array(items) => {
+            if items.is_empty() || prefix.is_empty() {
+                return;
+            }
+            fields.insert(prefix.to_string(), serde_json::to_string(items).unwrap_or_default());
+        }
+        Value::String(text) => {
+            if !prefix.is_empty() {
+                fields.insert(prefix.to_string(), text.to_string());
+            }
+        }
+        Value::Number(number) => {
+            if !prefix.is_empty() {
+                fields.insert(prefix.to_string(), number.to_string());
+            }
+        }
+        Value::Bool(flag) => {
+            if !prefix.is_empty() {
+                fields.insert(prefix.to_string(), flag.to_string());
+            }
+        }
+        Value::Null => {}
+    }
+}
+
+fn extract_text_fields(text: &str) -> HashMap<String, String> {
+    static KV_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)=(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)'|(?P<bare>[^\s]+))"#)
+            .expect("invalid key-value regex")
+    });
+
+    let mut fields = HashMap::new();
+    for captures in KV_RE.captures_iter(text) {
+        let Some(key_match) = captures.name("key") else {
+            continue;
+        };
+        let value = captures
+            .name("dq")
+            .or_else(|| captures.name("sq"))
+            .or_else(|| captures.name("bare"))
+            .map(|entry| entry.as_str())
+            .unwrap_or("");
+        if !value.is_empty() {
+            fields.insert(key_match.as_str().to_string(), value.to_string());
+        }
+    }
+    fields
 }
 
 fn detect_level_from_json(value: &Value) -> LogLevel {

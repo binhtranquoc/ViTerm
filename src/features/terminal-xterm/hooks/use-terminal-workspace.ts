@@ -15,8 +15,19 @@ import {
 import { invokeTauri, isTauriRuntime } from "@/features/terminal-xterm/hooks/use-terminal-pty"
 import type { ISshHost, TSshAuthType } from "@/features/terminal-xterm/interfaces/ssh-host.interfaces"
 import type { TTerminalTab } from "@/features/terminal-xterm/interfaces/terminal-workspace.interfaces"
-
 import type { IHostFormState } from "@/features/terminal-xterm/components/host-form"
+
+interface ITerminalWorkspaceCache {
+  terminalTabs: TTerminalTab[]
+  activeWorkspaceTab: string
+  reconnectNonceByTabId: Record<string, number>
+}
+
+const terminalWorkspaceCache: ITerminalWorkspaceCache = {
+  terminalTabs: [],
+  activeWorkspaceTab: TERMINAL_WORKSPACE_HOME_TAB,
+  reconnectNonceByTabId: {},
+}
 
 function emptyHostForm() {
   return {
@@ -46,8 +57,8 @@ export function useTerminalWorkspace() {
   const sshHosts = sshHostsQuery.data ?? []
   const sshGroups = sshGroupsQuery.data ?? []
 
-  const [terminalTabs, setTerminalTabs] = useState<TTerminalTab[]>([])
-  const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<string>(TERMINAL_WORKSPACE_HOME_TAB)
+  const [terminalTabs, setTerminalTabs] = useState<TTerminalTab[]>(() => terminalWorkspaceCache.terminalTabs)
+  const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<string>(() => terminalWorkspaceCache.activeWorkspaceTab)
 
   const [isNewHostOpen, setIsNewHostOpen] = useState(false)
   const [newHost, setNewHost] = useState(emptyHostForm)
@@ -63,10 +74,24 @@ export function useTerminalWorkspace() {
 
   const [searchKeyword, setSearchKeyword] = useState("")
   const [selectedGroup, setSelectedGroup] = useState<string>("all")
-  const [reconnectNonceByTabId, setReconnectNonceByTabId] = useState<Record<string, number>>({})
+  const [reconnectNonceByTabId, setReconnectNonceByTabId] = useState<Record<string, number>>(
+    () => terminalWorkspaceCache.reconnectNonceByTabId,
+  )
   const [pendingReconnect, setPendingReconnect] = useState<{ hostId: string; tabId: string } | null>(null)
 
   const isHomeTabActive = activeWorkspaceTab === TERMINAL_WORKSPACE_HOME_TAB
+
+  useEffect(() => {
+    terminalWorkspaceCache.terminalTabs = terminalTabs
+  }, [terminalTabs])
+
+  useEffect(() => {
+    terminalWorkspaceCache.activeWorkspaceTab = activeWorkspaceTab
+  }, [activeWorkspaceTab])
+
+  useEffect(() => {
+    terminalWorkspaceCache.reconnectNonceByTabId = reconnectNonceByTabId
+  }, [reconnectNonceByTabId])
 
   const consumePendingLocalTerminal = () => {
     const fromLocation = (location.state as { openLocalTerminal?: { cwd?: string; title?: string } } | null)
@@ -183,6 +208,10 @@ export function useTerminalWorkspace() {
   }
 
   const closeTerminalTab = (tabId: string) => {
+    if (isTauriRuntime()) {
+      void invokeTauri("stop_ssh_host_terminal", { tabId }).catch(() => {})
+      void invokeTauri("force_close_pty_tab", { tabId }).catch(() => {})
+    }
     setTerminalTabs((prev) => {
       const next = prev.filter((t) => t.id !== tabId)
       if (activeWorkspaceTab === tabId) {
@@ -372,12 +401,12 @@ export function useTerminalWorkspace() {
   }
 
   const requestEditHostById = (hostId: string, tabId?: string) => {
-    const host = sshHosts.find((item) => item.id === hostId)
-    if (!host) return
+    const matchedHost = sshHosts.find((sshHost) => sshHost.id === hostId)
+    if (!matchedHost) return
     if (tabId) {
       setPendingReconnect({ hostId, tabId })
     }
-    void openEditSheet(host)
+    void openEditSheet(matchedHost)
   }
 
   const handleUpdateHost = () => {

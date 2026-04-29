@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LogEntry {
@@ -9,6 +10,8 @@ pub struct LogEntry {
     pub parser_type: LogParserType,
     pub message: String,
     pub raw: String,
+    #[serde(default)]
+    pub fields: HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -32,5 +35,7 @@ pub enum LogLevel {
 pub enum LogParserType {
     Json,
     Text,
+    Logfmt,
     Nginx,
+    Laravel,
 }

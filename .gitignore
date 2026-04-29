@@ -26,3 +26,20 @@ dist-ssr
 .cursor
 docs/internal
 docs/application
+build-artifacts
+Makefile
+/logs
+
+# Env
+.env
+.env.*
+!.env.example
+# Secrets / certs / local DB
+*.pem
+*.key
+*.p12
+*.crt
+*.cer
+*.db
+*.sqlite
+*.sqlite3

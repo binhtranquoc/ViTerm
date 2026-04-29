@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import { useVirtualizer } from "@tanstack/react-virtual"
+import { Plus, Trash2 } from "lucide-react"
 import { Badge } from "@/shared/components/ui/badge"
 import { Button } from "@/shared/components/ui/button"
 import { Input } from "@/shared/components/ui/input"
@@ -12,16 +13,16 @@ import {
 } from "@/shared/components/ui/select"
 import { cn } from "@/shared/lib/utils"
 import {
+  createDefaultFieldCondition,
+  LOG_VIEWER_FIELD_OPERATOR_OPTIONS,
   LOG_VIEWER_LEVEL_OPTIONS,
-  LOG_VIEWER_PARSER_OPTIONS,
-  LOG_VIEWER_SOURCE_OPTIONS,
   LOG_VIEWER_STATUS_LABEL,
 } from "@/features/log-viewer/constants/log-viewer.const"
 import type {
+  ILogFieldFilterCondition,
   ILogPaneFilters,
   ILogPaneState,
   ILogRecord,
-  ILogService,
 } from "@/features/log-viewer/interfaces/log-viewer.interfaces"
 
 const levelClassName = {
@@ -79,8 +80,7 @@ const formatRecordContent = (record: ILogRecord, jsonViewMode: TJsonViewMode) =>
 
 interface LogPaneProps {
   pane: ILogPaneState
-  service?: ILogService
-  services: ILogService[]
+  serviceLabel: string
   records: ILogRecord[]
   draftFilters: ILogPaneFilters
   isLiveMode: boolean
@@ -88,13 +88,11 @@ interface LogPaneProps {
   onApplyDraftFilters: (paneId: string) => void
   onToggleLiveMode: (paneId: string, isLive: boolean) => void
   onResetFilters: (paneId: string) => void
-  onChangeService: (paneId: string, serviceId: string) => void
 }
 
 export function LogPane({
   pane,
-  service,
-  services,
+  serviceLabel,
   records,
   draftFilters,
   isLiveMode,
@@ -102,7 +100,6 @@ export function LogPane({
   onApplyDraftFilters,
   onToggleLiveMode,
   onResetFilters,
-  onChangeService,
 }: LogPaneProps) {
   const statusClassName =
     pane.status === "running"
@@ -119,6 +116,18 @@ export function LogPane({
     overscan: 8,
   })
   const virtualItems = rowVirtualizer.getVirtualItems()
+  const fieldOptions = Array.from(
+    new Set(records.flatMap((record) => Object.keys(record.fields ?? {}))),
+  ).sort((left, right) => left.localeCompare(right))
+
+  const updateFieldCondition = (conditionId: string, updater: Partial<ILogFieldFilterCondition>) => {
+    onChangeDraftFilters(pane.id, {
+      ...draftFilters,
+      fieldConditions: draftFilters.fieldConditions.map((condition) =>
+        condition.id === conditionId ? { ...condition, ...updater } : condition,
+      ),
+    })
+  }
 
   useEffect(() => {
     if (!isLiveMode) return
@@ -140,7 +149,7 @@ export function LogPane({
         <Badge variant={isLiveMode ? "default" : "secondary"} className="text-xs">
           {isLiveMode ? "Live" : "Paused"}
         </Badge>
-        <span className="text-xs text-muted-foreground">{service?.sourceLabel ?? "Unknown source"}</span>
+        <span className="text-xs text-muted-foreground">{serviceLabel}</span>
         <div className="ml-auto flex items-center gap-2">
           <div className="flex items-center gap-1 rounded-md border bg-background p-1">
             <Button
@@ -180,7 +189,7 @@ export function LogPane({
         </div>
       </header>
 
-      <div className="grid gap-5 border-b p-5 md:grid-cols-2 2xl:grid-cols-[minmax(220px,1.8fr)_minmax(180px,1fr)_minmax(160px,1fr)_minmax(180px,1fr)_minmax(180px,1fr)_auto]">
+      <div className="grid gap-4 border-b p-5 md:grid-cols-[minmax(220px,1.8fr)_minmax(180px,1fr)_auto]">
         <Input
           value={draftFilters.keyword}
           placeholder="Filter by keyword..."
@@ -191,19 +200,6 @@ export function LogPane({
             })
           }
         />
-
-        <Select value={pane.serviceId} onValueChange={(value) => onChangeService(pane.id, value)}>
-          <SelectTrigger className="w-full">
-            <SelectValue placeholder="Service" />
-          </SelectTrigger>
-          <SelectContent>
-            {services.map((item) => (
-              <SelectItem key={item.id} value={item.id}>
-                {item.title}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
 
         <Select
           value={draftFilters.level}
@@ -225,51 +221,84 @@ export function LogPane({
             ))}
           </SelectContent>
         </Select>
-
-        <Select
-          value={draftFilters.sourceType}
-          onValueChange={(value) =>
-            onChangeDraftFilters(pane.id, {
-              ...draftFilters,
-              sourceType: value as ILogPaneFilters["sourceType"],
-            })
-          }
-        >
-          <SelectTrigger className="w-full">
-            <SelectValue placeholder="Source type" />
-          </SelectTrigger>
-          <SelectContent>
-            {LOG_VIEWER_SOURCE_OPTIONS.map((option) => (
-              <SelectItem key={option.value} value={option.value}>
-                {option.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-
-        <Select
-          value={draftFilters.parserType}
-          onValueChange={(value) =>
-            onChangeDraftFilters(pane.id, {
-              ...draftFilters,
-              parserType: value as ILogPaneFilters["parserType"],
-            })
-          }
-        >
-          <SelectTrigger className="w-full">
-            <SelectValue placeholder="Parser type" />
-          </SelectTrigger>
-          <SelectContent>
-            {LOG_VIEWER_PARSER_OPTIONS.map((option) => (
-              <SelectItem key={option.value} value={option.value}>
-                {option.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
         <Button variant="outline" className="h-10" onClick={() => onResetFilters(pane.id)}>
           Reset
         </Button>
+      </div>
+      <div className="space-y-3 border-b px-5 py-4">
+        <div className="flex items-center justify-between">
+          <p className="text-xs font-medium text-muted-foreground">Field Filters (AND)</p>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8 px-2 text-[11px]"
+            onClick={() =>
+              onChangeDraftFilters(pane.id, {
+                ...draftFilters,
+                fieldConditions: [...draftFilters.fieldConditions, createDefaultFieldCondition()],
+              })
+            }
+          >
+            <Plus className="mr-1 h-3.5 w-3.5" />
+            Add condition
+          </Button>
+        </div>
+        {draftFilters.fieldConditions.length === 0 ? (
+          <p className="text-xs text-muted-foreground">No field condition. Add one to filter by key/value.</p>
+        ) : null}
+        {draftFilters.fieldConditions.map((condition) => (
+          <div key={condition.id} className="grid gap-2 md:grid-cols-[minmax(180px,1fr)_140px_minmax(180px,1fr)_auto]">
+            <Input
+              list={`field-options-${pane.id}`}
+              placeholder="field (e.g. status, user.id)"
+              value={condition.field}
+              onChange={(event) => updateFieldCondition(condition.id, { field: event.target.value })}
+            />
+            <Select
+              value={condition.operator}
+              onValueChange={(value) =>
+                updateFieldCondition(condition.id, { operator: value as ILogFieldFilterCondition["operator"] })
+              }
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {LOG_VIEWER_FIELD_OPERATOR_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Input
+              placeholder={condition.operator === "exists" ? "No value needed" : "value"}
+              value={condition.value}
+              disabled={condition.operator === "exists"}
+              onChange={(event) => updateFieldCondition(condition.id, { value: event.target.value })}
+            />
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-10 w-10"
+              onClick={() =>
+                onChangeDraftFilters(pane.id, {
+                  ...draftFilters,
+                  fieldConditions: draftFilters.fieldConditions.filter(
+                    (fieldCondition) => fieldCondition.id !== condition.id,
+                  ),
+                })
+              }
+            >
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          </div>
+        ))}
+        <datalist id={`field-options-${pane.id}`}>
+          {fieldOptions.map((field) => (
+            <option key={field} value={field} />
+          ))}
+        </datalist>
       </div>
       {!isLiveMode ? (
         <div className="border-b bg-muted/30 px-5 py-2 text-xs text-muted-foreground">
