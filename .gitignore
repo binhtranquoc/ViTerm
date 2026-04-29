@@ -43,3 +43,4 @@ Makefile
 *.db
 *.sqlite
 *.sqlite3
+/docs
