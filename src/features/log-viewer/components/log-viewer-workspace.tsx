@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { Ellipsis, Eraser, FolderOpen, Pencil, Plus, Settings2, SquareTerminal, Trash2, X } from "lucide-react"
+import { Eraser, FolderOpen, Pencil, Plus, SquareTerminal, Trash2, X } from "lucide-react"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -34,9 +34,10 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/shared/components/ui/dropdown-menu"
+import { useSortableTabDnd } from "@/shared/hooks/use-sortable-tab-dnd"
 import { cn } from "@/shared/lib/utils"
 import { LogPane } from "@/features/log-viewer/components/log-pane"
-import { useLogViewerWorkspace } from "@/features/log-viewer/hooks/use-log-viewer-workspace"
+import { useLogViewer } from "@/features/log-viewer/hooks/use-log-viewer-workspace"
 import { TerminalXterm } from "@/features/terminal-xterm/components/terminal-xterm"
 
 const paneAccentClassName = {
@@ -47,8 +48,8 @@ const paneAccentClassName = {
 } as const
 
 export function LogViewerWorkspace() {
-  const workspace = useLogViewerWorkspace()
-  const [isProjectSetupOpen, setIsProjectSetupOpen] = useState(false)
+  const workspace = useLogViewer()
+  const [openPaneMenuId, setOpenPaneMenuId] = useState<string | null>(null)
   const [editingPaneId, setEditingPaneId] = useState("")
   const [editPaneLogPaths, setEditPaneLogPaths] = useState<string[]>([])
   const [editRemotePathDraft, setEditRemotePathDraft] = useState("")
@@ -93,6 +94,34 @@ export function LogViewerWorkspace() {
 
   const activeService =
     workspace.activePane ? workspace.servicesById[workspace.activePane.serviceId] : undefined
+  const activePaneVisibleRecords = workspace.activePane
+    ? workspace.getVisibleRecordsByPane(workspace.activePane.id)
+    : []
+  const isActivePaneLiveMode = workspace.activePane
+    ? (workspace.paneLiveStates[workspace.activePane.id] ?? false)
+    : false
+  const getRuntimeLabel = (runtimeTarget?: "local" | "ssh") =>
+    runtimeTarget === "ssh" ? "SSH host" : "Local"
+  const activePaneServiceLabel = (() => {
+    if (!workspace.activePane) return "Unknown source"
+    const currentService = workspace.servicesById[workspace.activePane.serviceId]
+    if (!currentService) return "Unknown source"
+    return `${getRuntimeLabel(currentService.runtimeTarget)} - ${currentService.sourceLabel}`
+  })()
+  const {
+    draggingItemId: draggingPaneId,
+    dragPreview,
+    onItemPointerDown,
+    onItemPointerUp,
+  } = useSortableTabDnd({
+    itemIds: workspace.panes.map((pane) => pane.id),
+    onReorder: workspace.reorderPanes,
+    dataAttribute: "data-pane-id",
+  })
+  const draggingPane = draggingPaneId
+    ? workspace.panes.find((pane) => pane.id === draggingPaneId) ?? null
+    : null
+  const draggingPaneService = draggingPane ? workspace.servicesById[draggingPane.serviceId] : undefined
 
   useEffect(() => {
     // For SSH file-log mode, auto auth injection may require manual password entry.
@@ -239,7 +268,7 @@ export function LogViewerWorkspace() {
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-1 flex-col gap-5 overflow-hidden p-3">
+    <div className="flex h-full min-h-0 flex-1 flex-col gap-3 overflow-hidden p-2.5">
       <AlertDialog open={workspace.showRestorePrompt} onOpenChange={workspace.setShowRestorePrompt}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -286,79 +315,101 @@ export function LogViewerWorkspace() {
         }}
       />
 
-      <div className="flex items-center gap-5 overflow-x-auto rounded-lg border bg-card/70 px-3 py-2.5">
+      <div
+        className="flex items-center gap-3 overflow-x-auto rounded-lg border bg-card/70 px-2.5 py-2"
+      >
         <button
           type="button"
-          className="flex h-10 shrink-0 items-center gap-2 rounded-md border border-border bg-background px-3 text-xs font-medium text-foreground transition-colors hover:bg-muted"
+          className="flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-border bg-background px-2.5 text-[11px] font-medium text-foreground transition-colors hover:bg-muted"
           onClick={() => workspace.setIsAddPaneOpen(true)}
         >
-          <Plus className="h-3.5 w-3.5" />
+          <Plus className="h-3 w-3" />
           Add pane
         </button>
-        <button
-          type="button"
-          className="flex h-10 shrink-0 items-center gap-2 rounded-md border border-border bg-background px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          onClick={() => setIsProjectSetupOpen(true)}
-        >
-          <Settings2 className="h-3.5 w-3.5" />
-          Project setup
-        </button>
-        <div className="h-6 w-px shrink-0 bg-border" />
+        <div className="h-5 w-px shrink-0 bg-border" />
         {workspace.panes.map((pane) => {
           const service = workspace.servicesById[pane.serviceId]
           const isActive = pane.id === workspace.activePaneId
+          const isDragging = draggingPaneId === pane.id
 
           return (
-            <div
+            <DropdownMenu
               key={pane.id}
-              className={cn(
-                "flex shrink-0 items-center rounded-md border text-left text-xs transition-colors",
-                isActive
-                  ? "border-primary/50 bg-primary/10 text-primary"
-                  : "border-border bg-background text-muted-foreground hover:text-foreground",
-              )}
+              open={openPaneMenuId === pane.id}
+              onOpenChange={(open) => {
+                if (!open && openPaneMenuId === pane.id) {
+                  setOpenPaneMenuId(null)
+                }
+              }}
             >
-              <button
-                type="button"
-                className="flex h-10 items-center gap-2 px-3"
-                onClick={() => workspace.setActivePaneId(pane.id)}
-              >
-                <span className={cn("h-2 w-2 rounded-full", paneAccentClassName[pane.accentTone])} />
-                <SquareTerminal className="h-3.5 w-3.5" />
-                <span>{pane.title}</span>
-                <span className="text-[11px] text-muted-foreground">{service?.title}</span>
-              </button>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <button
-                    type="button"
-                    aria-label={`Open menu for ${pane.title}`}
-                    className="mr-2 flex h-7 w-7 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                    onClick={(event) => event.stopPropagation()}
-                  >
-                    <Ellipsis className="h-3.5 w-3.5" />
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem
-                    onClick={() => beginEditPane(pane.id)}
-                  >
-                    <Pencil className="h-3.5 w-3.5" />
-                    Edit
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    variant="destructive"
-                    onClick={() => workspace.closePaneConnection(pane.id)}
-                  >
-                    <X className="h-3.5 w-3.5" />
-                    Close
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  data-pane-id={pane.id}
+                  className={cn(
+                    "flex h-8 shrink-0 select-none items-center gap-1.5 rounded-md border px-2.5 text-left text-[11px] transition-colors",
+                    draggingPaneId ? "cursor-grabbing" : "cursor-grab",
+                    isDragging ? "scale-95 opacity-30" : "",
+                    isActive
+                      ? "border-primary/50 bg-primary/10 text-primary"
+                      : "border-border bg-background text-muted-foreground hover:text-foreground",
+                  )}
+                  onPointerDown={(event) => {
+                    onItemPointerDown(event, pane.id)
+                  }}
+                  onPointerUp={() => {
+                    onItemPointerUp()
+                  }}
+                  onClick={() => workspace.setActivePaneId(pane.id)}
+                  onContextMenu={(event) => {
+                    event.preventDefault()
+                    workspace.setActivePaneId(pane.id)
+                    setOpenPaneMenuId(pane.id)
+                  }}
+                >
+                  <span className={cn("h-1.5 w-1.5 rounded-full", paneAccentClassName[pane.accentTone])} />
+                  <SquareTerminal className="h-3.5 w-3.5" />
+                  <span className="max-w-40 truncate">{pane.title}</span>
+                  <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] uppercase text-muted-foreground">
+                    {getRuntimeLabel(service?.runtimeTarget)}
+                  </span>
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onClick={() => beginEditPane(pane.id)}>
+                  <Pencil className="h-3.5 w-3.5" />
+                  Edit
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  variant="destructive"
+                  onClick={() => workspace.closePaneConnection(pane.id)}
+                >
+                  <X className="h-3.5 w-3.5" />
+                  Close
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           )
         })}
       </div>
+      {dragPreview && draggingPane ? (
+        <div
+          className="pointer-events-none fixed z-50"
+          style={{
+            left: dragPreview.pointerX - dragPreview.offsetX,
+            top: dragPreview.pointerY - dragPreview.offsetY,
+          }}
+        >
+          <div className="flex h-8 select-none items-center gap-1.5 rounded-md border border-primary/40 bg-background/95 px-2.5 text-left text-[11px] text-foreground shadow-lg backdrop-blur-sm">
+            <span className={cn("h-1.5 w-1.5 rounded-full", paneAccentClassName[draggingPane.accentTone])} />
+            <SquareTerminal className="h-3.5 w-3.5" />
+            <span className="max-w-40 truncate">{draggingPane.title}</span>
+            <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] uppercase text-muted-foreground">
+              {getRuntimeLabel(draggingPaneService?.runtimeTarget)}
+            </span>
+          </div>
+        </div>
+      ) : null}
 
       <Sheet open={workspace.isAddPaneOpen} onOpenChange={workspace.setIsAddPaneOpen}>
         <SheetContent side="right" className="w-full sm:max-w-md">
@@ -368,8 +419,8 @@ export function LogViewerWorkspace() {
               Select project path. Pane name will be inferred from project folder.
             </SheetDescription>
           </SheetHeader>
-          <div className="space-y-5 px-4 py-3">
-            <div className="space-y-3 rounded-md border bg-muted/40 p-5">
+          <div className="space-y-3 px-4 py-3">
+            <div className="space-y-2 rounded-md border bg-muted/40 p-3.5">
               <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                 Connection target
               </p>
@@ -409,7 +460,7 @@ export function LogViewerWorkspace() {
                       event.currentTarget.value = ""
                     }}
                   />
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-2">
                     <Input
                       value={workspace.addPaneDraft.projectPath}
                       onChange={(event) =>
@@ -421,7 +472,7 @@ export function LogViewerWorkspace() {
                       type="button"
                       variant="outline"
                       size="icon"
-                      className="h-10 w-10 shrink-0"
+                      className="h-9 w-9 shrink-0"
                       onClick={async () => {
                         if (isTauriRuntime) {
                           try {
@@ -470,17 +521,12 @@ export function LogViewerWorkspace() {
                 </>
               )}
             </div>
-            <div className="rounded-md border bg-muted/40 p-5">
+            <div className="rounded-md border bg-muted/40 p-3.5">
               <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                 Project setup
               </p>
-              <div className="mt-5 grid gap-5">
-                <Input
-                  value={workspace.projectSetup.projectName}
-                  onChange={(event) => workspace.updateProjectSetup({ projectName: event.target.value })}
-                  placeholder="Project name"
-                />
-                <div className="grid grid-cols-2 gap-5">
+              <div className="mt-3 grid gap-3">
+                <div className="grid grid-cols-2 gap-3">
                   <Select
                     value={workspace.projectSetup.stack}
                     onValueChange={(value) =>
@@ -659,104 +705,6 @@ export function LogViewerWorkspace() {
         </SheetContent>
       </Sheet>
 
-      <Sheet open={isProjectSetupOpen} onOpenChange={setIsProjectSetupOpen}>
-        <SheetContent side="right" className="w-full sm:max-w-md">
-          <SheetHeader>
-            <SheetTitle>Update Project Setup</SheetTitle>
-            <SheetDescription>Adjust stack and log behavior for current log workspace.</SheetDescription>
-          </SheetHeader>
-          <div className="space-y-5 px-4 py-3">
-            <Input
-              value={workspace.projectSetup.projectName}
-              onChange={(event) => workspace.updateProjectSetup({ projectName: event.target.value })}
-              placeholder="Project name"
-            />
-            <div className="grid grid-cols-2 gap-5">
-              <Select
-                value={workspace.projectSetup.stack}
-                onValueChange={(value) =>
-                  workspace.updateProjectSetup({
-                    stack: value as "laravel" | "node" | "go" | "custom",
-                  })
-                }
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder="Tech stack" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="laravel">Laravel</SelectItem>
-                  <SelectItem value="node">Node</SelectItem>
-                  <SelectItem value="go">Go</SelectItem>
-                  <SelectItem value="custom">Custom</SelectItem>
-                </SelectContent>
-              </Select>
-              <Select
-                value={workspace.projectSetup.logOutput}
-                onValueChange={(value) =>
-                  workspace.updateProjectSetup({
-                    logOutput: value as "stdout" | "file" | "mixed",
-                  })
-                }
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder="Log output" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="stdout">Stdout only</SelectItem>
-                  <SelectItem value="file">File only</SelectItem>
-                  <SelectItem value="mixed">Stdout + file</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <label className="flex items-center gap-3 rounded-md border bg-background px-3 py-3 text-xs">
-              <Checkbox
-                checked={workspace.projectSetup.combineFileLogs}
-                onCheckedChange={(checked) =>
-                  workspace.updateProjectSetup({ combineFileLogs: checked === true })
-                }
-              />
-              Merge multi file logs into one timeline
-            </label>
-            {workspace.projectSetup.logOutput === "file" ? (
-              <div className="space-y-2 rounded-md border bg-background p-3">
-                <div className="flex items-center justify-between">
-                  <p className="text-xs font-medium text-muted-foreground">
-                    {workspace.projectSetup.combineFileLogs ? "Merged log files" : "Log file"}
-                  </p>
-                  <Button type="button" size="sm" variant="outline" className="h-8 px-2 text-[11px]" onClick={openLogFilesPicker}>
-                    Select files
-                  </Button>
-                </div>
-                <div className="space-y-2">
-                  {workspace.projectSetup.fileLogPaths.length === 0 ? (
-                    <p className="text-xs text-muted-foreground">No file selected yet.</p>
-                  ) : (
-                    workspace.projectSetup.fileLogPaths
-                      .slice(0, workspace.projectSetup.combineFileLogs ? undefined : 1)
-                      .map((path) => (
-                      <div key={path} className="flex items-center gap-2 rounded border px-2 py-1.5">
-                        <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">{path}</span>
-                        <button
-                          type="button"
-                          className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-                          onClick={() => removeFileLogPath(path)}
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-            ) : null}
-          </div>
-          <SheetFooter className="pt-2 sm:flex-row sm:justify-end">
-            <Button variant="outline" onClick={() => setIsProjectSetupOpen(false)}>
-              Close
-            </Button>
-          </SheetFooter>
-        </SheetContent>
-      </Sheet>
       <Sheet open={editingPaneId.length > 0} onOpenChange={(open) => (!open ? closeEditPane() : undefined)}>
         <SheetContent side="right" className="w-full sm:max-w-md">
           <SheetHeader>
@@ -906,22 +854,44 @@ export function LogViewerWorkspace() {
       <div className="min-h-0 flex-1">
         {workspace.activePane ? (
           <div className="flex h-full min-h-0 flex-col gap-3">
-            <div className="flex justify-end">
-              <div className="flex items-center gap-2">
+            <div className="flex items-center justify-between rounded-md border bg-card/60 px-2.5 py-1.5">
+              <div className="flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
+                <span className="rounded border bg-background px-1.5 py-0.5">
+                  {activePaneVisibleRecords.length} logs
+                </span>
+                <span
+                  className={cn(
+                    "rounded px-1.5 py-0.5",
+                    isActivePaneLiveMode
+                      ? "bg-primary/10 text-primary"
+                      : "bg-muted text-muted-foreground",
+                  )}
+                >
+                  {isActivePaneLiveMode ? "live" : "paused"}
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5">
                 <Button
                   variant="outline"
                   size="sm"
-                  className="h-8 px-3 text-xs"
+                  className="h-7 gap-1.5 px-2 text-[11px] text-muted-foreground hover:text-foreground"
                   onClick={() => workspace.clearPaneLogs(workspace.activePane.id)}
+                  title="Clear current pane logs"
                 >
-                  <Eraser className="h-3.5 w-3.5" />
+                  <Eraser className="h-3 w-3" />
                   Clear logs
                 </Button>
                 <Button
                   variant="outline"
                   size="sm"
-                  className="h-8 px-3 text-xs"
+                  className={cn(
+                    "h-7 px-2 text-[11px]",
+                    isTerminalVisible
+                      ? "border-primary/40 bg-primary/10 text-primary hover:bg-primary/15"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
                   onClick={() => setIsTerminalVisible((prev) => !prev)}
+                  title={isTerminalVisible ? "Hide terminal panel" : "Show terminal panel"}
                 >
                   {isTerminalVisible ? "Hide terminal" : "Show terminal"}
                 </Button>
@@ -937,8 +907,8 @@ export function LogViewerWorkspace() {
             >
               <LogPane
                 pane={workspace.activePane}
-                serviceLabel={workspace.servicesById[workspace.activePane.serviceId]?.sourceLabel ?? "Unknown source"}
-                records={workspace.getVisibleRecordsByPane(workspace.activePane.id)}
+                serviceLabel={activePaneServiceLabel}
+                records={activePaneVisibleRecords}
                 draftFilters={
                   workspace.paneFilterDrafts[workspace.activePane.id] ?? workspace.activePane.filters
                 }
@@ -972,7 +942,7 @@ export function LogViewerWorkspace() {
                               <span className="h-2 w-2 rounded-full bg-emerald-400/90" />
                               <span>{pane.title}</span>
                               <span className="text-zinc-500">
-                                {paneService?.runtimeTarget === "ssh" ? "ssh" : "local"}
+                                {getRuntimeLabel(paneService?.runtimeTarget)}
                               </span>
                             </div>
                             <span className="text-zinc-500">

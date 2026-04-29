@@ -139,10 +139,7 @@ export function LogPane({
   return (
     <article className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border bg-card/80">
       <header className="flex flex-wrap items-center gap-5 border-b px-5 py-3">
-        <div className="flex items-center gap-3">
-          <span className={cn("h-2.5 w-2.5 rounded-full", paneAccentClassName[pane.accentTone])} />
-          <h3 className="text-sm font-semibold">{pane.title}</h3>
-        </div>
+        <span className={cn("h-2.5 w-2.5 rounded-full", paneAccentClassName[pane.accentTone])} />
         <Badge variant="outline" className={cn("text-xs", statusClassName)}>
           {LOG_VIEWER_STATUS_LABEL[pane.status]}
         </Badge>

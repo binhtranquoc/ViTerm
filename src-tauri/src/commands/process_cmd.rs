@@ -50,7 +50,7 @@ pub async fn spawn_process(
             source_id,
             command,
             cwd,
-            json_only.unwrap_or(true),
+            json_only.unwrap_or(false),
             log_emitter,
             status_emitter,
         )

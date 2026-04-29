@@ -234,6 +234,19 @@ export function useTerminalWorkspace() {
     setActiveWorkspaceTab(duplicatedTab.id)
   }
 
+  const reorderTerminalTabs = (sourceTabId: string, targetTabId: string) => {
+    if (sourceTabId === targetTabId) return
+    setTerminalTabs((previousTabs) => {
+      const sourceIndex = previousTabs.findIndex((tab) => tab.id === sourceTabId)
+      const targetIndex = previousTabs.findIndex((tab) => tab.id === targetTabId)
+      if (sourceIndex < 0 || targetIndex < 0) return previousTabs
+      const nextTabs = [...previousTabs]
+      const [movingTab] = nextTabs.splice(sourceIndex, 1)
+      nextTabs.splice(targetIndex, 0, movingTab)
+      return nextTabs
+    })
+  }
+
   const duplicateHost = async (host: ISshHost) => {
     try {
       const secrets = await sshHostSecretsLookup.mutateAsync(host.id)
@@ -492,6 +505,7 @@ export function useTerminalWorkspace() {
     openSshTerminalTab,
     closeTerminalTab,
     duplicateTerminalTab,
+    reorderTerminalTabs,
     goHome: () => setActiveWorkspaceTab(TERMINAL_WORKSPACE_HOME_TAB),
     // quick add
     isQuickAddOpen,

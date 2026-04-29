@@ -1,8 +1,8 @@
 mod common;
-mod host_crud_cmd;
-mod remote_entries_cmd;
-mod ssh_file_log_cmd;
-mod ssh_terminal_cmd;
+pub mod host_crud_cmd;
+pub mod remote_entries_cmd;
+pub mod ssh_file_log_cmd;
+pub mod ssh_terminal_cmd;
 
 pub use host_crud_cmd::{
     create_ssh_host, delete_ssh_host, get_ssh_host_secrets, list_ssh_groups, list_ssh_hosts,

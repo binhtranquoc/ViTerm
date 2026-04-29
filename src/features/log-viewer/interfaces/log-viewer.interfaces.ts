@@ -75,7 +75,6 @@ export interface IProjectLogSource {
 }
 
 export interface IProjectSetupState {
-  projectName: string
   stack: "laravel" | "node" | "go" | "custom"
   logOutput: "stdout" | "file" | "mixed"
   combineFileLogs: boolean
