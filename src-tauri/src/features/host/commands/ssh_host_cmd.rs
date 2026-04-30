@@ -1,5 +1,7 @@
-use crate::core::ssh_host_store;
-use crate::models::ssh_host::{CreateSshHostPayload, SshHost, SshHostSecrets, UpdateSshHostPayload};
+use crate::features::host::core::ssh_host_store;
+use crate::features::host::models::ssh_host::{
+    CreateSshHostPayload, SshHost, SshHostSecrets, UpdateSshHostPayload,
+};
 
 #[tauri::command]
 pub async fn list_ssh_hosts() -> Result<Vec<SshHost>, String> {

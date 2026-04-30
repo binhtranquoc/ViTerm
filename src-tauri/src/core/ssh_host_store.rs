@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use chrono::Utc;
 use uuid::Uuid;
 
-use crate::models::ssh_host::{CreateSshHostPayload, SshHost, SshSourcesFile, UpdateSshHostPayload};
+use crate::features::host::models::ssh_host::{
+    CreateSshHostPayload, SshHost, SshSourcesFile, UpdateSshHostPayload,
+};
 
 // ── config dir ─────────────────────────────────────────────────────────────────
 

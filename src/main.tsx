@@ -1,5 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import { invoke } from "@tauri-apps/api/core";
 import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 
@@ -17,3 +18,7 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     </BrowserRouter>
   </React.StrictMode>,
 );
+
+void invoke("mark_app_ready").catch((error) => {
+  console.error("Failed to mark app as ready", error);
+});

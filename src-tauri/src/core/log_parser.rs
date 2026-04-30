@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 use uuid::Uuid;
 
-use crate::models::log_entry::{LogEntry, LogLevel, LogParserType};
-use crate::utils::timestamp::now_iso_string;
+use crate::features::log_viewer::models::log_entry::{LogEntry, LogLevel, LogParserType};
+use crate::shared::utils::timestamp::now_iso_string;
 
 pub fn parse_line(line: &str, source_id: &str) -> LogEntry {
     let stripped = strip_ansi(line);

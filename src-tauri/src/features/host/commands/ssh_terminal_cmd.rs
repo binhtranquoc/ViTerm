@@ -1,16 +1,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::commands::pty_cmd::make_pty_output_callback;
-use crate::commands::ssh_host_cmd::common::{
+use crate::app::state::AppState;
+use crate::features::host::commands::common::{
     SSH_MAX_RETRIES, build_ssh_launch_context, emit_ssh_state, schedule_temp_key_cleanup,
 };
-use crate::core::ssh_host_store;
-use crate::state::AppState;
+use crate::features::host::core::ssh_host_store;
+use crate::features::terminal::commands::pty_cmd::make_pty_output_callback;
 
-/// Opens a PTY session connected to an SSH process for the given saved host.
-/// Returns the instance_id so the frontend can pass it back to `close_pty`
-/// and avoid stale React cleanups killing the wrong session.
 #[tauri::command]
 pub async fn open_ssh_host_terminal(
     host_id: String,

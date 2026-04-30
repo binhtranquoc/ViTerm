@@ -3,8 +3,8 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::Emitter;
 
-use crate::models::log_entry::{LogBatchPayload, LogEntry};
-use crate::state::AppState;
+use crate::app::state::AppState;
+use crate::features::log_viewer::models::log_entry::{LogBatchPayload, LogEntry};
 
 #[derive(Debug, Clone, Serialize)]
 struct SourceStatusPayload {
