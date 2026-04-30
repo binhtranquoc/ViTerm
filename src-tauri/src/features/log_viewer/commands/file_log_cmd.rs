@@ -3,8 +3,8 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::Emitter;
 
-use crate::models::log_entry::{LogBatchPayload, LogEntry};
-use crate::state::AppState;
+use crate::app::state::AppState;
+use crate::features::log_viewer::models::log_entry::{LogBatchPayload, LogEntry};
 
 #[derive(Debug, Clone, Serialize)]
 struct SourceStatusPayload {
@@ -39,8 +39,7 @@ pub async fn start_file_log_streams(
     }
     eprintln!(
         "[file-log-debug] start source_id={} files={:?}",
-        source_id,
-        normalized_paths
+        source_id, normalized_paths
     );
 
     let grouped_source_ids = normalized_paths
@@ -77,8 +76,7 @@ pub async fn start_file_log_streams(
     let status_emitter = Arc::new(move |_status_source_id: String, status: String| {
         eprintln!(
             "[file-log-debug] status source_id={} status={}",
-            source_id_for_status,
-            status
+            source_id_for_status, status
         );
         let payload = SourceStatusPayload {
             source_id: source_id_for_status.clone(),
@@ -123,8 +121,7 @@ pub async fn stop_file_log_streams(
     if let Some(group_ids) = state.file_log_groups.lock().await.remove(&source_id) {
         eprintln!(
             "[file-log-debug] stop group source_id={} child_ids={:?}",
-            source_id,
-            group_ids
+            source_id, group_ids
         );
         for child_id in group_ids {
             let _ = state.file_log_manager.stop_watching(&child_id).await;

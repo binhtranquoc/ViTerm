@@ -7,11 +7,13 @@ use serde::Serialize;
 use tauri::Emitter;
 use tokio::sync::Mutex;
 
-use crate::commands::ssh_host_cmd::common::{SSH_FILE_LOG_READY_MARKER, build_ssh_launch_context, schedule_temp_key_cleanup};
-use crate::core::log_parser::{is_laravel_log_start, parse_line};
-use crate::core::ssh_host_store;
-use crate::models::log_entry::{LogBatchPayload, LogEntry};
-use crate::state::AppState;
+use crate::app::state::AppState;
+use crate::features::host::commands::common::{
+    SSH_FILE_LOG_READY_MARKER, build_ssh_launch_context, schedule_temp_key_cleanup,
+};
+use crate::features::host::core::ssh_host_store;
+use crate::features::log_viewer::core::parser::log_parser::{is_laravel_log_start, parse_line};
+use crate::features::log_viewer::models::log_entry::{LogBatchPayload, LogEntry};
 
 #[derive(Debug, Clone, Serialize)]
 struct SourceStatusPayload {

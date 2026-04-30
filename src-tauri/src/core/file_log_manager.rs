@@ -7,8 +7,8 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{Mutex, mpsc};
 
-use crate::core::log_parser::{is_laravel_log_start, parse_line};
-use crate::models::log_entry::LogEntry;
+use crate::features::log_viewer::core::parser::log_parser::{is_laravel_log_start, parse_line};
+use crate::features::log_viewer::models::log_entry::LogEntry;
 
 type LogBatchCallback = Arc<dyn Fn(Vec<LogEntry>) + Send + Sync>;
 type StatusCallback = Arc<dyn Fn(String, String) + Send + Sync>;

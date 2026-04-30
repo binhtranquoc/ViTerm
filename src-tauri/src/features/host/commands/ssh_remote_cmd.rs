@@ -4,12 +4,12 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::commands::ssh_host_cmd::common::{
+use crate::app::state::AppState;
+use crate::features::host::commands::common::{
     SshRemoteListResult, build_remote_list_script, build_ssh_launch_context, parse_remote_list_output,
     schedule_temp_key_cleanup,
 };
-use crate::core::ssh_host_store;
-use crate::state::AppState;
+use crate::features::host::core::ssh_host_store;
 
 #[tauri::command]
 pub async fn list_ssh_remote_entries(

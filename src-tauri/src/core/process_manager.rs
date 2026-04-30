@@ -8,8 +8,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc};
 
-use crate::core::log_parser::parse_line;
-use crate::models::log_entry::{LogEntry, LogParserType};
+use crate::features::log_viewer::core::parser::log_parser::parse_line;
+use crate::features::log_viewer::models::log_entry::{LogEntry, LogParserType};
 
 type SharedChild = Arc<Mutex<Child>>;
 type LogBatchCallback = Arc<dyn Fn(Vec<LogEntry>) + Send + Sync>;

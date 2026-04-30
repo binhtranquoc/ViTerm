@@ -38,7 +38,6 @@ pub struct CreateSshHostPayload {
     pub passphrase: Option<String>,
 }
 
-/// Only non-sensitive fields are required; secret fields are updated only when provided.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateSshHostPayload {
     pub name: String,

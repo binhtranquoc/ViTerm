@@ -7,8 +7,8 @@ use serde_json::json;
 use tauri::Emitter;
 use uuid::Uuid;
 
-use crate::core::ssh_host_store;
-use crate::models::ssh_host::SshHost;
+use crate::features::host::core::ssh_host_store;
+use crate::features::host::models::ssh_host::SshHost;
 
 pub(crate) const SSH_MAX_RETRIES: u32 = 5;
 pub(crate) const SSH_FILE_LOG_READY_MARKER: &str = "__QBASE_SSH_FILE_LOG_READY__";
@@ -43,7 +43,6 @@ pub struct SshRemoteListResult {
     pub entries: Vec<SshRemoteEntry>,
 }
 
-/// Writes a private key to a temp file with restricted permissions (0600).
 fn write_temp_key(key_content: &str) -> Result<std::path::PathBuf, String> {
     let id = Uuid::new_v4().to_string();
     let path = std::env::temp_dir().join(format!("qbase_key_{id}"));
@@ -153,7 +152,6 @@ pub(crate) fn build_ssh_launch_context(host: &SshHost) -> Result<SshLaunchContex
         ssh_args.push("KbdInteractiveAuthentication=no".into());
         ssh_args.push("-o".into());
         ssh_args.push("NumberOfPasswordPrompts=10".into());
-
         ssh_args.push("-o".into());
         ssh_args.push("PasswordAuthentication=yes".into());
 
@@ -172,7 +170,10 @@ pub(crate) fn build_ssh_launch_context(host: &SshHost) -> Result<SshLaunchContex
         format!("{}@{}:{}", host.username, host.host, host.port),
         has_passphrase_secret,
         has_account_password_secret,
-        auto_password.as_ref().map(|value| !value.is_empty()).unwrap_or(false)
+        auto_password
+            .as_ref()
+            .map(|value| !value.is_empty())
+            .unwrap_or(false)
     );
 
     ssh_args.push(format!("{}@{}", host.username, host.host));
@@ -191,7 +192,7 @@ fn shell_single_quote(value: &str) -> String {
 pub(crate) fn build_remote_list_script(base_path: &str) -> String {
     let quoted_path = shell_single_quote(base_path);
     format!(
-            "P={quoted_path}; \
+        "P={quoted_path}; \
     if [ -d \"$P\" ]; then \
     for e in \"$P\"/* \"$P\"/.[!.]* \"$P\"/..?*; do \
     [ -e \"$e\" ] || continue; \
@@ -202,7 +203,8 @@ pub(crate) fn build_remote_list_script(base_path: &str) -> String {
     elif [ -f \"$P\" ]; then \
     n=$(basename \"$P\"); \
     printf \"file\\t%s\\t%s\\n\" \"$n\" \"$P\"; \
-    fi")
+    fi"
+    )
 }
 
 pub(crate) fn parse_remote_list_output(raw_output: &str) -> Vec<SshRemoteEntry> {

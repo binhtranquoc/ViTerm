@@ -4,10 +4,10 @@ use std::sync::atomic::AtomicBool;
 
 use tokio::sync::Mutex;
 
-use crate::core::file_log_manager::FileLogManager;
-use crate::core::process_manager::ProcessManager;
-use crate::core::pty_manager::PtyManager;
-use crate::core::ssh_session_manager::SshSessionManager;
+use crate::features::host::core::ssh_session_manager::SshSessionManager;
+use crate::features::log_viewer::core::file_log::watcher::FileLogManager;
+use crate::features::log_viewer::core::stdout_log::manager::ProcessManager;
+use crate::features::terminal::core::pty_manager::PtyManager;
 
 #[derive(Default)]
 pub struct AppState {

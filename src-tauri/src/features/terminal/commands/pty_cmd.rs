@@ -4,7 +4,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::Serialize;
 use tauri::Emitter;
 
-use crate::state::AppState;
+use crate::app::state::AppState;
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct PtyOutputPayload {
@@ -12,7 +12,6 @@ pub(crate) struct PtyOutputPayload {
     pub data: String,
 }
 
-/// Builds the output callback that encodes bytes as base64 and emits a Tauri event.
 pub(crate) fn make_pty_output_callback(
     app_handle: tauri::AppHandle,
     tab_id: String,
@@ -22,8 +21,8 @@ pub(crate) fn make_pty_output_callback(
             tab_id: tab_id.clone(),
             data: STANDARD.encode(&data),
         };
-        if let Err(e) = app_handle.emit("pty-output", payload) {
-            eprintln!("emit pty-output error: {e}");
+        if let Err(error) = app_handle.emit("pty-output", payload) {
+            eprintln!("emit pty-output error: {error}");
         }
     })
 }
@@ -66,7 +65,7 @@ pub async fn write_pty(
 ) -> Result<(), String> {
     let bytes = STANDARD
         .decode(&data)
-        .map_err(|e| format!("base64 decode error: {e}"))?;
+        .map_err(|error| format!("base64 decode error: {error}"))?;
     state.pty_manager.write_pty(&tab_id, &bytes).await
 }
 

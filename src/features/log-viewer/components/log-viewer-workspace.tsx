@@ -412,14 +412,14 @@ export function LogViewerWorkspace() {
       ) : null}
 
       <Sheet open={workspace.isAddPaneOpen} onOpenChange={workspace.setIsAddPaneOpen}>
-        <SheetContent side="right" className="w-full sm:max-w-md">
+        <SheetContent side="right" className="w-full overflow-hidden sm:max-w-md">
           <SheetHeader>
             <SheetTitle>Add Log Pane</SheetTitle>
             <SheetDescription>
               Select project path. Pane name will be inferred from project folder.
             </SheetDescription>
           </SheetHeader>
-          <div className="space-y-3 px-4 py-3">
+          <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3">
             <div className="space-y-2 rounded-md border bg-muted/40 p-3.5">
               <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                 Connection target
@@ -706,14 +706,14 @@ export function LogViewerWorkspace() {
       </Sheet>
 
       <Sheet open={editingPaneId.length > 0} onOpenChange={(open) => (!open ? closeEditPane() : undefined)}>
-        <SheetContent side="right" className="w-full sm:max-w-md">
+        <SheetContent side="right" className="w-full overflow-hidden sm:max-w-md">
           <SheetHeader>
             <SheetTitle>Edit Pane Source</SheetTitle>
             <SheetDescription>
               {editingPane ? `Update log files for ${editingPane.title}` : "Update pane source"}
             </SheetDescription>
           </SheetHeader>
-          <div className="space-y-3 px-4 py-3">
+          <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3">
             {editingService?.runtimeTarget === "ssh" ? (
               <p className="text-xs text-muted-foreground">
                 Enter remote log file paths on the selected host.
